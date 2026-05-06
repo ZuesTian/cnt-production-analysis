@@ -20,3 +20,12 @@ Thumbs.db
 dist/
 .venv/
 upx.exe
+
+# 生产数据
+*.xlsx
+*.xls
+*.csv
+
+# 文档
+应用需求文档.md
+改进计划.md
