@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f output/炉子级统计_*.xlsx output/每日汇总*.xlsx output/每月汇总*.xlsx output/故障分析_*.xlsx output/故障预警_*.xlsx output/异常检测报告_*.xlsx output/单炉每日趋势数据_*.xlsx output/*.png)",
+      "Bash(rm -rf output/单炉每日趋势图_*/)",
+      "Bash(where upx *)",
+      "Bash(.venv/Scripts/python -m pip install --upgrade pip -q)",
+      "Bash(.venv/Scripts/pyinstaller --version)"
+    ]
+  }
+}

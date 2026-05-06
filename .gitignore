@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# pytest
+.pytest_cache/
+
+# 输出缓存
+output/.cache/
+output/.preview/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+Thumbs.db
+~$*.xlsx
+dist/
+.venv/
+upx.exe

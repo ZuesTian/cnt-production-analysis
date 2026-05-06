@@ -1,0 +1,27 @@
+source_columns:
+  date: 日期
+  team: 班组
+  furnace: 炉号
+  reaction_time: 生产时间
+  fault_time: 设备故障影响时间
+  clean_empty_burn_time: 停机清理空烧
+  output: 产量
+  source_yield: 小时产能
+
+production_lines:
+  L3:
+    patterns: ["L3", "E", "F", "G", "H", "B"]
+  "11A":
+    patterns: ["11A"]
+
+ranking:
+  top_percent: 0.2
+
+alert_thresholds:
+  max_fault_hours_per_day: 24
+  fault_warning_hours_per_day: 8
+  fault_critical_hours_per_day: 12
+  consecutive_fault_days: 2
+  monthly_fault_hours_warning: 24
+  min_yield_rate: 50
+  anomaly_sigma: 2.0
