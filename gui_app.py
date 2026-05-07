@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import io
 import os
 import queue
@@ -47,6 +48,20 @@ HEADER = "#17384A"
 ROW_ALT = "#F5F8FA"
 WARNING = "#B25E00"
 DANGER = "#B42318"
+BASE_DPI = 96
+BASE_TK_SCALING = BASE_DPI / 72
+
+
+def _enable_high_dpi_awareness() -> None:
+    """Ask Windows to give Tk real DPI information before the root window exists."""
+    if sys.platform != "win32":
+        return
+
+    with contextlib.suppress(Exception):
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    with contextlib.suppress(Exception):
+        ctypes.windll.user32.SetProcessDPIAware()
 
 
 class QueueWriter:
@@ -71,9 +86,9 @@ class QueueWriter:
 class AnalysisApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        self._init_ui_scaling()
         self.title(APP_TITLE)
-        self.geometry("1180x760")
-        self.minsize(1060, 680)
+        self._set_window_size(self, 1180, 760, 1060, 680)
         self.configure(bg=BG)
 
         self.event_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -132,6 +147,50 @@ class AnalysisApp(tk.Tk):
         self._build_layout()
         self._poll_events()
 
+    def _init_ui_scaling(self) -> None:
+        try:
+            tk_scaling = float(self.tk.call("tk", "scaling"))
+        except (tk.TclError, ValueError):
+            tk_scaling = BASE_TK_SCALING
+        self.ui_scale = max(1.0, tk_scaling / BASE_TK_SCALING)
+
+    def _px(self, value: int | float) -> int:
+        if value == 0:
+            return 0
+        return max(1, int(round(value * self.ui_scale)))
+
+    def _pad(self, *values: int | float) -> tuple[int, ...]:
+        return tuple(self._px(value) for value in values)
+
+    def _fit_to_screen(self, width: int, height: int, margin: int) -> tuple[int, int]:
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        margin_px = self._px(margin)
+        return (
+            min(self._px(width), max(1, screen_w - margin_px)),
+            min(self._px(height), max(1, screen_h - margin_px)),
+        )
+
+    def _set_window_size(
+        self,
+        window: tk.Tk | tk.Toplevel,
+        width: int,
+        height: int,
+        min_width: int,
+        min_height: int,
+    ) -> None:
+        target_w, target_h = self._fit_to_screen(width, height, 80)
+        min_w, min_h = self._fit_to_screen(min_width, min_height, 120)
+        window.geometry(f"{target_w}x{target_h}")
+        window.minsize(min(min_w, target_w), min(min_h, target_h))
+
+    def _sync_canvas_window(self, canvas: tk.Canvas, window_id: int, inner: ttk.Frame) -> None:
+        inner.update_idletasks()
+        width = max(1, canvas.winfo_width())
+        height = max(canvas.winfo_height(), inner.winfo_reqheight(), 1)
+        canvas.itemconfigure(window_id, width=width, height=height)
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
         try:
@@ -146,7 +205,7 @@ class AnalysisApp(tk.Tk):
 
         style.configure("TFrame", background=BG)
         style.configure("Panel.TFrame", background=PANEL, relief="flat")
-        style.configure("Card.TFrame", background=PANEL, relief="solid", borderwidth=1)
+        style.configure("Card.TFrame", background=PANEL, relief="solid", borderwidth=self._px(1))
         style.configure("Soft.TFrame", background=PANEL_ALT, relief="flat")
         style.configure("Header.TFrame", background=HEADER)
         style.configure("Toolbar.TFrame", background=PANEL)
@@ -168,24 +227,24 @@ class AnalysisApp(tk.Tk):
         style.map("TCheckbutton", background=[("active", PANEL)], foreground=[("disabled", MUTED)])
         style.map("TRadiobutton", background=[("active", PANEL)], foreground=[("disabled", MUTED)])
 
-        style.configure("TButton", font=base_font, padding=(11, 7), relief="flat")
+        style.configure("TButton", font=base_font, padding=self._pad(11, 7), relief="flat")
         style.configure("Accent.TButton", background=ACCENT, foreground="#FFFFFF", bordercolor=ACCENT, focusthickness=0)
         style.map("Accent.TButton", background=[("active", ACCENT_DARK), ("pressed", ACCENT_DARK), ("disabled", "#A9B7C0")])
-        style.configure("Primary.TButton", background=ACCENT, foreground="#FFFFFF", bordercolor=ACCENT, padding=(14, 9), font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("Primary.TButton", background=ACCENT, foreground="#FFFFFF", bordercolor=ACCENT, padding=self._pad(14, 9), font=("Microsoft YaHei UI", 10, "bold"))
         style.map("Primary.TButton", background=[("active", ACCENT_DARK), ("pressed", ACCENT_DARK), ("disabled", "#A9B7C0")])
         style.configure("Ghost.TButton", background=PANEL, foreground=TEXT, bordercolor=BORDER)
         style.map("Ghost.TButton", background=[("active", "#EDF4F7"), ("pressed", "#E5EEF2")])
         style.configure("Subtle.TButton", background="#EDF4F7", foreground=ACCENT_DARK, bordercolor="#C5D8DF")
         style.map("Subtle.TButton", background=[("active", "#DDECEF"), ("pressed", "#D3E5E9")])
 
-        style.configure("TEntry", fieldbackground="#FFFFFF", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=7)
-        style.configure("TCombobox", fieldbackground="#FFFFFF", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=5)
+        style.configure("TEntry", fieldbackground="#FFFFFF", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=self._px(7))
+        style.configure("TCombobox", fieldbackground="#FFFFFF", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=self._px(5))
         style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#DDE6ED", bordercolor="#DDE6ED", lightcolor=ACCENT, darkcolor=ACCENT)
-        style.configure("Treeview", font=small_font, rowheight=30, background="#FFFFFF", fieldbackground="#FFFFFF", foreground=TEXT, borderwidth=0)
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"), background="#E6EFF4", foreground=TEXT, relief="flat", padding=(6, 5))
+        style.configure("Treeview", font=small_font, rowheight=self._px(30), background="#FFFFFF", fieldbackground="#FFFFFF", foreground=TEXT, borderwidth=0)
+        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"), background="#E6EFF4", foreground=TEXT, relief="flat", padding=self._pad(6, 5))
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "#FFFFFF")])
-        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
-        style.configure("TNotebook.Tab", font=base_font, padding=(16, 8), background="#DFE9EF")
+        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=self._pad(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", font=base_font, padding=self._pad(16, 8), background="#DFE9EF")
         style.map("TNotebook.Tab", background=[("selected", PANEL), ("active", "#EEF4F7")], foreground=[("selected", TEXT), ("active", TEXT)])
 
     def _set_default_input(self) -> None:
@@ -196,51 +255,83 @@ class AnalysisApp(tk.Tk):
         self.input_var.set(str(path.resolve()))
 
     def _build_layout(self) -> None:
-        header = ttk.Frame(self, style="Header.TFrame", padding=(24, 14))
+        header = ttk.Frame(self, style="Header.TFrame", padding=self._pad(24, 14))
         header.pack(fill="x")
         ttk.Label(header, text=APP_TITLE, style="HeaderTitle.TLabel").pack(anchor="w")
-        ttk.Label(header, text="导入生产数据，生成炉子级统计、每日/月汇总、趋势图和故障预警", style="HeaderSub.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(header, text="导入生产数据，生成炉子级统计、每日/月汇总、趋势图和故障预警", style="HeaderSub.TLabel").pack(anchor="w", pady=self._pad(4, 0))
 
-        main = ttk.Frame(self, padding=14)
+        main = ttk.Frame(self, padding=self._px(14))
         main.pack(fill="both", expand=True)
-        main.columnconfigure(0, weight=0, minsize=410)
-        main.columnconfigure(1, weight=1)
+        main.columnconfigure(0, weight=0, minsize=self._px(410))  # left canvas
+        main.columnconfigure(1, weight=0)                # left scrollbar
+        main.columnconfigure(2, weight=1)                # right canvas (expands)
+        main.columnconfigure(3, weight=0)                # right scrollbar
         main.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(main, style="Panel.TFrame", padding=14)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        # 左侧面板用 Canvas 包裹，支持滚动（小分辨率适配）
+        left_canvas = tk.Canvas(main, bg=PANEL, highlightthickness=0, width=self._px(410))
+        left_scrollbar = ttk.Scrollbar(main, orient="vertical", command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
+        left_canvas.grid(row=0, column=0, sticky="nsew", padx=self._pad(0, 12))
+        left_scrollbar.grid(row=0, column=1, sticky="ns")
 
-        right = ttk.Frame(main, style="TFrame")
-        right.grid(row=0, column=1, sticky="nsew")
+        left = ttk.Frame(left_canvas, style="Panel.TFrame", padding=self._px(14))
+        self._left_canvas = left_canvas
+        self._left_window = left_canvas.create_window((0, 0), window=left, anchor="nw", tags=("inner",))
+        # 鼠标滚轮绑定
+        def _on_left_scroll(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        left_canvas.bind("<Enter>", lambda _: left_canvas.bind_all("<MouseWheel>", _on_left_scroll))
+        left_canvas.bind("<Leave>", lambda _: left_canvas.unbind_all("<MouseWheel>"))
+        # 确保内部 frame 的宽高跟随 canvas，内容超出时仍可滚动
+        left.bind("<Configure>", lambda _: self.after_idle(lambda: self._sync_canvas_window(left_canvas, self._left_window, left)))
+        left_canvas.bind("<Configure>", lambda _: self.after_idle(lambda: self._sync_canvas_window(left_canvas, self._left_window, left)))
+
+        # 右侧面板也用 Canvas 包裹，支持滚动
+        right_canvas = tk.Canvas(main, bg=BG, highlightthickness=0)
+        right_scrollbar = ttk.Scrollbar(main, orient="vertical", command=right_canvas.yview)
+        right_canvas.configure(yscrollcommand=right_scrollbar.set)
+        right_canvas.grid(row=0, column=2, sticky="nsew")
+        right_scrollbar.grid(row=0, column=3, sticky="ns")
+
+        right = ttk.Frame(right_canvas, style="TFrame")
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
+        self._right_canvas = right_canvas
+        self._right_window = right_canvas.create_window((0, 0), window=right, anchor="nw", tags=("right_inner",))
+        def _on_right_scroll(event):
+            right_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        right_canvas.bind("<Enter>", lambda _: right_canvas.bind_all("<MouseWheel>", _on_right_scroll))
+        right_canvas.bind("<Leave>", lambda _: right_canvas.unbind_all("<MouseWheel>"))
+        right.bind("<Configure>", lambda _: self.after_idle(lambda: self._sync_canvas_window(right_canvas, self._right_window, right)))
+        right_canvas.bind("<Configure>", lambda _: self.after_idle(lambda: self._sync_canvas_window(right_canvas, self._right_window, right)))
 
         self._build_left_panel(left)
         self._build_overview_panel(right)
         self._build_result_panel(right)
 
     def _section(self, parent: ttk.Frame, title: str, subtitle: str = "", *, fill: str = "x", expand: bool = False) -> ttk.Frame:
-        outer = ttk.Frame(parent, style="Card.TFrame", padding=(12, 10))
-        outer.pack(fill=fill, expand=expand, pady=(0, 10))
+        outer = ttk.Frame(parent, style="Card.TFrame", padding=self._pad(12, 10))
+        outer.pack(fill=fill, expand=expand, pady=self._pad(0, 10))
         ttk.Label(outer, text=title, style="Section.TLabel").pack(anchor="w")
         if subtitle:
-            ttk.Label(outer, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
+            ttk.Label(outer, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=self._pad(2, 8))
         body = ttk.Frame(outer, style="Panel.TFrame")
-        body.pack(fill="both" if fill == "both" else "x", expand=expand, pady=(0 if subtitle else 8, 0))
+        body.pack(fill="both" if fill == "both" else "x", expand=expand, pady=self._pad(0 if subtitle else 8, 0))
         return body
 
     def _build_left_panel(self, parent: ttk.Frame) -> None:
         source = self._section(parent, "数据源", "选择原始数据文件和报表输出位置")
         file_row = ttk.Frame(source, style="Panel.TFrame")
-        file_row.pack(fill="x", pady=(0, 8))
+        file_row.pack(fill="x", pady=self._pad(0, 8))
         file_row.columnconfigure(0, weight=1)
-        ttk.Entry(file_row, textvariable=self.input_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Entry(file_row, textvariable=self.input_var).grid(row=0, column=0, sticky="ew", padx=self._pad(0, 8))
         ttk.Button(file_row, text="浏览", style="Subtle.TButton", command=self.choose_input).grid(row=0, column=1)
 
         output_row = ttk.Frame(source, style="Panel.TFrame")
-        output_row.pack(fill="x", pady=(0, 10))
+        output_row.pack(fill="x", pady=self._pad(0, 10))
         output_row.columnconfigure(0, weight=1)
-        ttk.Entry(output_row, textvariable=self.output_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Entry(output_row, textvariable=self.output_var).grid(row=0, column=0, sticky="ew", padx=self._pad(0, 8))
         ttk.Button(output_row, text="输出目录", style="Subtle.TButton", command=self.choose_output).grid(row=0, column=1)
 
         ttk.Button(source, text="加载数据 / 刷新炉号", style="Primary.TButton", command=self.load_data_async).pack(fill="x")
@@ -258,13 +349,13 @@ class AnalysisApp(tk.Tk):
         for index, (text, variable) in enumerate(check_items):
             row = index // 2
             col = index % 2
-            ttk.Checkbutton(checks, text=text, variable=variable).grid(row=row, column=col, sticky="w", pady=3, padx=(0, 12))
+            ttk.Checkbutton(checks, text=text, variable=variable).grid(row=row, column=col, sticky="w", pady=self._px(3), padx=self._pad(0, 12))
         checks.columnconfigure((0, 1), weight=1)
 
         date_box = self._section(parent, "日期范围", "可选全部、最近时间段或手动指定起止日期")
         date_box.columnconfigure(1, weight=1)
         date_box.columnconfigure(3, weight=1)
-        ttk.Label(date_box, text="快捷", style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(date_box, text="快捷", style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=self._pad(0, 6))
         self.date_preset_combo = ttk.Combobox(
             date_box,
             textvariable=self.date_preset_var,
@@ -272,14 +363,14 @@ class AnalysisApp(tk.Tk):
             width=10,
             values=["全部", "近7天", "近30天", "近90天", "自定义"],
         )
-        self.date_preset_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        self.date_preset_combo.grid(row=0, column=1, sticky="ew", padx=self._pad(8, 0), pady=self._pad(0, 6))
         self.date_preset_combo.bind("<<ComboboxSelected>>", lambda _: self._apply_date_preset())
         ttk.Label(date_box, text="开始", style="Muted.TLabel").grid(row=1, column=0, sticky="w")
         self.start_date_combo = ttk.Combobox(date_box, textvariable=self.start_date_var, width=12)
-        self.start_date_combo.grid(row=1, column=1, sticky="ew", padx=(8, 8))
+        self.start_date_combo.grid(row=1, column=1, sticky="ew", padx=self._pad(8, 8))
         ttk.Label(date_box, text="结束", style="Muted.TLabel").grid(row=1, column=2, sticky="w")
         self.end_date_combo = ttk.Combobox(date_box, textvariable=self.end_date_var, width=12)
-        self.end_date_combo.grid(row=1, column=3, sticky="ew", padx=(8, 0))
+        self.end_date_combo.grid(row=1, column=3, sticky="ew", padx=self._pad(8, 0))
         self.start_date_combo.bind("<<ComboboxSelected>>", lambda _: self.date_preset_var.set("自定义"))
         self.end_date_combo.bind("<<ComboboxSelected>>", lambda _: self.date_preset_var.set("自定义"))
 
@@ -287,24 +378,24 @@ class AnalysisApp(tk.Tk):
         mode_row = ttk.Frame(furnace_section, style="Panel.TFrame")
         mode_row.pack(fill="x")
         ttk.Radiobutton(mode_row, text="全区炉子", value="all", variable=self.furnace_mode, command=self._update_selection_label).pack(side="left")
-        ttk.Radiobutton(mode_row, text="自选炉子 / 前缀匹配", value="custom", variable=self.furnace_mode, command=self._update_selection_label).pack(side="left", padx=(16, 0))
+        ttk.Radiobutton(mode_row, text="自选炉子 / 前缀匹配", value="custom", variable=self.furnace_mode, command=self._update_selection_label).pack(side="left", padx=self._pad(16, 0))
 
-        ttk.Label(furnace_section, text="多个炉号用逗号分隔，例如 E 或 E01,F01", style="Muted.TLabel").pack(anchor="w", pady=(9, 4))
+        ttk.Label(furnace_section, text="多个炉号用逗号分隔，例如 E 或 E01,F01", style="Muted.TLabel").pack(anchor="w", pady=self._pad(9, 4))
         selector_row = ttk.Frame(furnace_section, style="Panel.TFrame")
         selector_row.pack(fill="x")
         selector_row.columnconfigure(0, weight=1)
         self.selector_entry = ttk.Entry(selector_row, textvariable=self.selector_var)
-        self.selector_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.selector_entry.grid(row=0, column=0, sticky="ew", padx=self._pad(0, 8))
         self.selector_entry.bind("<Return>", lambda _: self.match_furnace_selector())
         ttk.Button(selector_row, text="匹配", style="Subtle.TButton", command=self.match_furnace_selector).grid(row=0, column=1)
 
         list_header = ttk.Frame(furnace_section, style="Panel.TFrame")
-        list_header.pack(fill="x", pady=(12, 4))
+        list_header.pack(fill="x", pady=self._pad(12, 4))
         ttk.Label(list_header, text="可用炉号", style="Panel.TLabel").pack(side="left")
         ttk.Label(list_header, textvariable=self.selection_count_var, style="Status.TLabel").pack(side="right")
 
-        list_frame = tk.Frame(furnace_section, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        list_frame.pack(fill="both", expand=True, pady=(0, 8))
+        list_frame = tk.Frame(furnace_section, bg=PANEL, highlightbackground=BORDER, highlightthickness=self._px(1))
+        list_frame.pack(fill="both", expand=True, pady=self._pad(0, 8))
         self.furnace_listbox = tk.Listbox(
             list_frame,
             selectmode=tk.EXTENDED,
@@ -320,27 +411,27 @@ class AnalysisApp(tk.Tk):
         )
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.furnace_listbox.yview)
         self.furnace_listbox.configure(yscrollcommand=scrollbar.set)
-        self.furnace_listbox.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self.furnace_listbox.pack(side="left", fill="both", expand=True, padx=self._px(4), pady=self._px(4))
         scrollbar.pack(side="right", fill="y")
         self.furnace_listbox.bind("<<ListboxSelect>>", lambda _: self._update_selection_label())
 
         actions = ttk.Frame(furnace_section, style="Panel.TFrame")
         actions.pack(fill="x")
         ttk.Button(actions, text="全选", style="Ghost.TButton", command=self.select_all_furnaces).pack(side="left")
-        ttk.Button(actions, text="清空", style="Ghost.TButton", command=self.clear_furnace_selection).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="清空", style="Ghost.TButton", command=self.clear_furnace_selection).pack(side="left", padx=self._pad(8, 0))
         ttk.Button(actions, text="预览单炉趋势", style="Subtle.TButton", command=self._preview_single_furnace).pack(side="right")
 
         run_box = ttk.Frame(parent, style="Panel.TFrame")
         run_box.pack(fill="x")
         ttk.Button(run_box, text="运行分析", style="Primary.TButton", command=self.run_analysis_async).pack(fill="x")
         export_btn = ttk.Frame(run_box, style="Panel.TFrame")
-        export_btn.pack(fill="x", pady=(8, 0))
+        export_btn.pack(fill="x", pady=self._pad(8, 0))
         ttk.Button(export_btn, text="导出报表", style="Subtle.TButton", command=self._export_cached_reports).pack(side="left", fill="x", expand=True)
-        ttk.Button(export_btn, text="打开输出目录", style="Ghost.TButton", command=self.open_output_dir).pack(side="left", fill="x", expand=True, padx=(8, 0))
+        ttk.Button(export_btn, text="打开输出目录", style="Ghost.TButton", command=self.open_output_dir).pack(side="left", fill="x", expand=True, padx=self._pad(8, 0))
 
     def _build_overview_panel(self, parent: ttk.Frame) -> None:
-        overview = ttk.Frame(parent, style="Panel.TFrame", padding=(14, 12))
-        overview.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        overview = ttk.Frame(parent, style="Panel.TFrame", padding=self._pad(14, 12))
+        overview.grid(row=0, column=0, sticky="ew", pady=self._pad(0, 12))
         overview.columnconfigure((0, 1, 2, 3, 4), weight=1)
 
         stats = [
@@ -351,25 +442,25 @@ class AnalysisApp(tk.Tk):
             ("生产线", self.stat_lines),
         ]
         for index, (name, variable) in enumerate(stats):
-            cell = ttk.Frame(overview, style="Card.TFrame", padding=(12, 9))
-            cell.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 10, 0))
+            cell = ttk.Frame(overview, style="Card.TFrame", padding=self._pad(12, 9))
+            cell.grid(row=0, column=index, sticky="ew", padx=self._pad(0 if index == 0 else 10, 0))
             ttk.Label(cell, textvariable=variable, style="StatValue.TLabel").pack(anchor="w")
-            ttk.Label(cell, text=name, style="StatName.TLabel").pack(anchor="w", pady=(3, 0))
+            ttk.Label(cell, text=name, style="StatName.TLabel").pack(anchor="w", pady=self._pad(3, 0))
 
         status_row = ttk.Frame(overview, style="Panel.TFrame")
-        status_row.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(12, 0))
+        status_row.grid(row=1, column=0, columnspan=5, sticky="ew", pady=self._pad(12, 0))
         status_row.columnconfigure(1, weight=1)
-        ttk.Label(status_row, text="状态", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(status_row, text="状态", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=self._pad(0, 12))
         ttk.Progressbar(status_row, variable=self.progress_var, mode="determinate", maximum=100).grid(row=0, column=1, sticky="ew")
-        ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=2, sticky="e", padx=(12, 0))
+        ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=2, sticky="e", padx=self._pad(12, 0))
 
     def _build_result_panel(self, parent: ttk.Frame) -> None:
         self.notebook = notebook = ttk.Notebook(parent)
         notebook.grid(row=1, column=0, sticky="nsew")
 
-        output_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=14)
-        log_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=14)
-        self.preview_tab = preview_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=14)
+        output_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=self._px(14))
+        log_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=self._px(14))
+        self.preview_tab = preview_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=self._px(14))
         preview_tab.bind("<Configure>", self._on_preview_resize)
         notebook.add(output_tab, text="输出文件")
         notebook.add(log_tab, text="运行日志")
@@ -378,15 +469,15 @@ class AnalysisApp(tk.Tk):
         output_tab.rowconfigure(1, weight=1)
         output_tab.columnconfigure(0, weight=1)
         output_head = ttk.Frame(output_tab, style="Panel.TFrame")
-        output_head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        output_head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=self._pad(0, 8))
         ttk.Label(output_head, text="分析结果", style="Section.TLabel").pack(side="left")
         ttk.Label(output_head, text="运行分析后先缓存，点击导出报表再写入文件", style="Muted.TLabel").pack(side="right")
 
         self.output_tree = ttk.Treeview(output_tab, columns=("name", "path"), show="headings", height=12)
         self.output_tree.heading("name", text="文件")
         self.output_tree.heading("path", text="状态 / 路径")
-        self.output_tree.column("name", width=210, anchor="w")
-        self.output_tree.column("path", width=520, anchor="w")
+        self.output_tree.column("name", width=self._px(210), anchor="w")
+        self.output_tree.column("path", width=self._px(520), anchor="w")
         self.output_tree.grid(row=1, column=0, sticky="nsew")
         self.output_tree.tag_configure("odd", background=ROW_ALT)
         self.output_tree.tag_configure("cache", foreground=ACCENT_DARK)
@@ -397,10 +488,10 @@ class AnalysisApp(tk.Tk):
         output_scroll.grid(row=1, column=1, sticky="ns")
 
         output_buttons = ttk.Frame(output_tab, style="Panel.TFrame")
-        output_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        output_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=self._pad(12, 0))
         ttk.Button(output_buttons, text="打开选中文件", style="Ghost.TButton", command=self.open_selected_output).pack(side="left")
-        ttk.Button(output_buttons, text="查看故障预警", style="Subtle.TButton", command=self.show_fault_warning_window).pack(side="left", padx=(8, 0))
-        ttk.Button(output_buttons, text="打开输出目录", style="Ghost.TButton", command=self.open_output_dir).pack(side="left", padx=(8, 0))
+        ttk.Button(output_buttons, text="查看故障预警", style="Subtle.TButton", command=self.show_fault_warning_window).pack(side="left", padx=self._pad(8, 0))
+        ttk.Button(output_buttons, text="打开输出目录", style="Ghost.TButton", command=self.open_output_dir).pack(side="left", padx=self._pad(8, 0))
 
         log_tab.rowconfigure(0, weight=1)
         log_tab.columnconfigure(0, weight=1)
@@ -409,7 +500,7 @@ class AnalysisApp(tk.Tk):
             wrap="word",
             borderwidth=0,
             highlightbackground=BORDER,
-            highlightthickness=1,
+            highlightthickness=self._px(1),
             font=("Consolas", 10),
             foreground=TEXT,
             background="#FBFCFD",
@@ -424,27 +515,27 @@ class AnalysisApp(tk.Tk):
         preview_tab.columnconfigure(0, weight=1)
 
         switch = ttk.Frame(preview_tab, style="Toolbar.TFrame")
-        switch.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        switch.grid(row=0, column=0, sticky="ew", pady=self._pad(0, 10))
         chart_buttons = ttk.Frame(switch, style="Toolbar.TFrame")
         chart_buttons.pack(fill="x")
         ttk.Button(chart_buttons, text="炉子级统计图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("furnace")).pack(side="left")
-        ttk.Button(chart_buttons, text="每日趋势图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("daily")).pack(side="left", padx=(8, 0))
-        ttk.Button(chart_buttons, text="每月趋势图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("monthly")).pack(side="left", padx=(8, 0))
-        ttk.Button(chart_buttons, text="故障热力图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("fault_heatmap")).pack(side="left", padx=(8, 0))
-        ttk.Button(chart_buttons, text="前后20%排名", style="Ghost.TButton", command=self.show_ranking_window).pack(side="left", padx=(8, 0))
+        ttk.Button(chart_buttons, text="每日趋势图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("daily")).pack(side="left", padx=self._pad(8, 0))
+        ttk.Button(chart_buttons, text="每月趋势图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("monthly")).pack(side="left", padx=self._pad(8, 0))
+        ttk.Button(chart_buttons, text="故障热力图", style="Ghost.TButton", command=lambda: self.show_scoped_preview("fault_heatmap")).pack(side="left", padx=self._pad(8, 0))
+        ttk.Button(chart_buttons, text="前后20%排名", style="Ghost.TButton", command=self.show_ranking_window).pack(side="left", padx=self._pad(8, 0))
         ttk.Button(chart_buttons, text="导出当前图片", style="Accent.TButton", command=self.export_current_preview_image).pack(side="right")
-        ttk.Label(chart_buttons, textvariable=self.preview_meta_var, style="Status.TLabel").pack(side="right", padx=(0, 12))
+        ttk.Label(chart_buttons, textvariable=self.preview_meta_var, style="Status.TLabel").pack(side="right", padx=self._pad(0, 12))
 
         furnace_tools = ttk.Frame(switch, style="Toolbar.TFrame")
-        furnace_tools.pack(fill="x", pady=(8, 0))
+        furnace_tools.pack(fill="x", pady=self._pad(8, 0))
         ttk.Label(furnace_tools, text="单炉图表", style="Muted.TLabel").pack(side="left")
         self.furnace_chart_combo = ttk.Combobox(furnace_tools, textvariable=self.furnace_chart_var, state="readonly", width=26)
-        self.furnace_chart_combo.pack(side="left", padx=(8, 6))
+        self.furnace_chart_combo.pack(side="left", padx=self._pad(8, 6))
         self.furnace_chart_combo.bind("<<ComboboxSelected>>", self._on_furnace_chart_select)
         ttk.Button(furnace_tools, text="显示单炉图", style="Subtle.TButton", command=self._show_selected_furnace_chart).pack(side="left")
         ttk.Button(furnace_tools, text="输出目录", style="Ghost.TButton", command=self.open_output_dir).pack(side="right")
 
-        preview_surface = ttk.Frame(preview_tab, style="Soft.TFrame", padding=10)
+        preview_surface = ttk.Frame(preview_tab, style="Soft.TFrame", padding=self._px(10))
         preview_surface.grid(row=1, column=0, sticky="nsew")
         preview_surface.rowconfigure(0, weight=1)
         preview_surface.columnconfigure(0, weight=1)
@@ -1094,24 +1185,23 @@ class AnalysisApp(tk.Tk):
         win = tk.Toplevel(self)
         win.transient(self)
         win.title("前后20% 炉号排名")
-        win.geometry("950x580")
-        win.minsize(750, 420)
+        self._set_window_size(win, 950, 580, 750, 420)
         win.configure(bg=BG)
 
-        header = ttk.Frame(win, style="Header.TFrame", padding=(20, 14))
+        header = ttk.Frame(win, style="Header.TFrame", padding=self._pad(20, 14))
         header.pack(fill="x")
         ttk.Label(header, text=f"前后20% 炉号排名 — {len(summary)} 条记录",
                   style="HeaderTitle.TLabel").pack(anchor="w")
 
         notebook = ttk.Notebook(win)
-        notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        notebook.pack(fill="both", expand=True, padx=self._px(8), pady=self._px(8))
 
         display_cols = ["月份", "类型", "排名", "炉号", "生产线", "反应周期数", "数值"]
         metrics = sorted(summary["指标"].dropna().unique())
 
         for metric in metrics:
             sub = summary[summary["指标"] == metric]
-            tab = ttk.Frame(notebook, style="Panel.TFrame", padding=8)
+            tab = ttk.Frame(notebook, style="Panel.TFrame", padding=self._px(8))
             notebook.add(tab, text=metric.replace("平均", ""))
             tab.rowconfigure(0, weight=1)
             tab.columnconfigure(0, weight=1)
@@ -1125,10 +1215,10 @@ class AnalysisApp(tk.Tk):
             tree.heading("反应周期数", text="周期数")
             tree.heading("数值", text="数值")
             for col in display_cols:
-                tree.column(col, width=75 if col in ("月份", "类型", "排名", "生产线") else
-                            55 if col == "反应周期数" else 80, anchor="center")
-            tree.column("炉号", width=70, anchor="center")
-            tree.column("数值", width=90, anchor="center")
+                width = 75 if col in ("月份", "类型", "排名", "生产线") else 55 if col == "反应周期数" else 80
+                tree.column(col, width=self._px(width), anchor="center")
+            tree.column("炉号", width=self._px(70), anchor="center")
+            tree.column("数值", width=self._px(90), anchor="center")
 
             for _, row in sub.iterrows():
                 tag = "top" if str(row.get("类型", "")) == "前20%" else "bottom"
@@ -1140,7 +1230,7 @@ class AnalysisApp(tk.Tk):
             scroll_y.grid(row=0, column=1, sticky="ns")
             tree.configure(yscrollcommand=scroll_y.set)
 
-        btn_row = ttk.Frame(win, style="Panel.TFrame", padding=14)
+        btn_row = ttk.Frame(win, style="Panel.TFrame", padding=self._px(14))
         btn_row.pack(fill="x")
         ttk.Button(btn_row, text="关闭", style="Ghost.TButton", command=win.destroy).pack(side="right")
 
@@ -1171,31 +1261,30 @@ class AnalysisApp(tk.Tk):
         win.transient(self)
         win.protocol("WM_DELETE_WINDOW", win.destroy)
         win.title("故障预警详情")
-        win.geometry("1050x620")
-        win.minsize(800, 400)
+        self._set_window_size(win, 1050, 620, 800, 400)
         win.configure(bg=BG)
 
         # 标题
-        header = ttk.Frame(win, style="Header.TFrame", padding=(20, 14))
+        header = ttk.Frame(win, style="Header.TFrame", padding=self._pad(20, 14))
         header.pack(fill="x")
         serious_count = int((warnings["预警级别"] == "严重").sum())
         ttk.Label(header, text=f"故障预警报告 — 共 {len(warnings)} 条预警（严重 {serious_count} 条）",
                   style="HeaderTitle.TLabel").pack(anchor="w")
 
-        content = ttk.Frame(win, style="TFrame", padding=14)
+        content = ttk.Frame(win, style="TFrame", padding=self._px(14))
         content.pack(fill="both", expand=True)
         content.rowconfigure(1, weight=1)
         content.columnconfigure(0, weight=1)
 
         # 上半部分：预警汇总
-        sum_frame = ttk.Frame(content, style="Panel.TFrame", padding=10)
-        sum_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(sum_frame, text="预警汇总", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        sum_frame = ttk.Frame(content, style="Panel.TFrame", padding=self._px(10))
+        sum_frame.grid(row=0, column=0, sticky="ew", pady=self._pad(0, 10))
+        ttk.Label(sum_frame, text="预警汇总", style="Section.TLabel").pack(anchor="w", pady=self._pad(0, 6))
 
         sum_tree = ttk.Treeview(sum_frame, columns=list(summary.columns), show="headings", height=5)
         for col in summary.columns:
             sum_tree.heading(col, text=col)
-            sum_tree.column(col, width=min(160, max(80, len(str(col)) * 16)), anchor="center")
+            sum_tree.column(col, width=self._px(min(160, max(80, len(str(col)) * 16))), anchor="center")
         for _, row in summary.iterrows():
             values = list(row)
             tag = "critical" if row.get("预警级别") == "严重" else ""
@@ -1206,12 +1295,12 @@ class AnalysisApp(tk.Tk):
         sum_tree.configure(yscrollcommand=sum_scroll.set)
 
         # 下半部分：预警明细
-        detail_frame = ttk.Frame(content, style="Panel.TFrame", padding=10)
+        detail_frame = ttk.Frame(content, style="Panel.TFrame", padding=self._px(10))
         detail_frame.grid(row=1, column=0, sticky="nsew")
         detail_frame.rowconfigure(0, weight=0)
         detail_frame.rowconfigure(1, weight=1)
         detail_frame.columnconfigure(0, weight=1)
-        ttk.Label(detail_frame, text="预警明细", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(detail_frame, text="预警明细", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=self._pad(0, 6))
 
         show_cols = ["预警级别", "预警类型", "日期", "年月", "生产线", "炉号", "故障时间", "阈值数值", "阈值单位", "说明"]
         detail_tree = ttk.Treeview(detail_frame, columns=show_cols, show="headings")
@@ -1219,7 +1308,7 @@ class AnalysisApp(tk.Tk):
                       "炉号": 70, "故障时间": 80, "阈值数值": 65, "阈值单位": 55, "说明": 360}
         for col in show_cols:
             detail_tree.heading(col, text=col)
-            detail_tree.column(col, width=col_widths.get(col, 100), anchor="center" if col != "说明" else "w")
+            detail_tree.column(col, width=self._px(col_widths.get(col, 100)), anchor="center" if col != "说明" else "w")
         for _, row in warnings.iterrows():
             tag = "critical" if row["预警级别"] == "严重" else "warning"
             detail_tree.insert("", tk.END, values=[row.get(c, "") for c in show_cols], tags=(tag,))
@@ -1233,7 +1322,7 @@ class AnalysisApp(tk.Tk):
         detail_tree.configure(yscrollcommand=detail_scroll_y.set, xscrollcommand=detail_scroll_x.set)
 
         # 底部按钮
-        btn_row = ttk.Frame(win, style="Panel.TFrame", padding=14)
+        btn_row = ttk.Frame(win, style="Panel.TFrame", padding=self._px(14))
         btn_row.pack(fill="x")
         if self.fault_warning_path and self.fault_warning_path.exists():
             ttk.Button(btn_row, text="打开 Excel 文件", style="Ghost.TButton",
@@ -1500,9 +1589,8 @@ class AnalysisApp(tk.Tk):
         parent = self.preview_label.master
         container_w = parent.winfo_width() if parent.winfo_width() > 10 else 860
         container_h = parent.winfo_height() if parent.winfo_height() > 10 else 560
-        # 扣除按钮栏(~80px) + 炉子选择栏(~30px) + padding
-        max_w = max(400, container_w - 30)
-        max_h = max(450, container_h - 120)
+        max_w = max(self._px(240), container_w - self._px(20))
+        max_h = max(self._px(240), container_h - self._px(20))
         image.thumbnail((max_w, max_h), Image.LANCZOS)
         if self.preview_image is not None:
             del self.preview_image
@@ -1543,6 +1631,7 @@ def main() -> None:
     if PIL_IMPORT_ERROR is not None:
         print("缺少 Pillow 库，请运行：pip install Pillow")
         sys.exit(1)
+    _enable_high_dpi_awareness()
     app = AnalysisApp()
     app.mainloop()
 
