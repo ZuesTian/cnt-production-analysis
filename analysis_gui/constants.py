@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+"""Shared GUI constants."""
+
+APP_TITLE = "碳纳米管生产数据分析系统"
+BG = "#F3F6FA"
+PANEL = "#FFFFFF"
+PANEL_ALT = "#F8FAFC"
+TEXT = "#18232F"
+MUTED = "#667085"
+ACCENT = "#177E76"
+ACCENT_DARK = "#11635D"
+BORDER = "#D7DEE8"
+HEADER = "#123443"
+ROW_ALT = "#F7FAFC"
+WARNING = "#B76E00"
+DANGER = "#B42318"
+BASE_DPI = 96
+BASE_TK_SCALING = BASE_DPI / 72

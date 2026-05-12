@@ -17,7 +17,8 @@ def write_workbook(path: Path, df: pd.DataFrame, sheet_name: str = "L3产出1月
         df.to_excel(writer, sheet_name=sheet_name, index=False)
 
 
-def test_load_and_clean_data_merges_same_day_furnace_cycles(tmp_path: Path) -> None:
+def test_load_and_clean_data_keeps_each_shift_as_cycle(tmp_path: Path) -> None:
+    """每条班次记录 = 一次启停周期，不再按天汇总"""
     source = pd.DataFrame(
         [
             {
@@ -57,19 +58,26 @@ def test_load_and_clean_data_merges_same_day_furnace_cycles(tmp_path: Path) -> N
 
     cycles = analysis.load_and_clean_data(workbook)
 
-    assert len(cycles) == 1
-    row = cycles.iloc[0]
-    assert row["炉号"] == "E01"
-    assert row["日期"] == pd.Timestamp("2026-01-01")
-    assert row["生产线"] == "L3"
-    assert row["原始记录数"] == 2
-    assert row["来源行号"] == "2,3"
-    assert row["反应时间"] == pytest.approx(19.2)
-    assert row["空烧时间"] == pytest.approx(1.5)
-    assert row["降清时间"] == pytest.approx(1.5)
-    assert row["故障时间"] == pytest.approx(0)
-    assert row["产量"] == pytest.approx(1800)
-    assert row["产率"] == pytest.approx(1800 / 19.2)
+    # 两条 E01 记录各自是一个独立的周期，"总计"行被过滤
+    assert len(cycles) == 2
+
+    # 第一条：白班
+    row0 = cycles.iloc[0]
+    assert row0["炉号"] == "E01"
+    assert row0["班组"] == "白班"
+    assert row0["反应时间"] == pytest.approx(9.2)    # "9..2" 修复
+    assert row0["产量"] == pytest.approx(800)
+    assert row0["产率"] == pytest.approx(800 / 9.2)
+    assert row0["周期序号"] == 1
+
+    # 第二条：夜班（班组=NaN，ffill 填充为"白班"）
+    row1 = cycles.iloc[1]
+    assert row1["炉号"] == "E01"
+    assert row1["反应时间"] == pytest.approx(10)
+    assert row1["空烧时间"] == pytest.approx(1.5)
+    assert row1["产量"] == pytest.approx(1000)
+    assert row1["产率"] == pytest.approx(1000 / 10)
+    assert row1["周期序号"] == 2
 
 
 def test_load_and_clean_data_reports_file_level_missing_columns(tmp_path: Path) -> None:

@@ -5,7 +5,16 @@
       "Bash(rm -rf output/单炉每日趋势图_*/)",
       "Bash(where upx *)",
       "Bash(.venv/Scripts/python -m pip install --upgrade pip -q)",
-      "Bash(.venv/Scripts/pyinstaller --version)"
+      "Bash(.venv/Scripts/pyinstaller --version)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_analysis.py -v)",
+      "Bash(rm -rf build dist *.spec)",
+      "Bash(.venv/Scripts/pyinstaller --onefile --windowed --name \"碳纳米管生产数据分析\" --upx-dir \".\" --add-data \"config.yaml;.\" --hidden-import analysis --hidden-import openpyxl.cell._writer --exclude-module scipy --exclude-module IPython --exclude-module jupyter --exclude-module notebook --exclude-module tkinter.test --exclude-module matplotlib.tests --exclude-module pandas.tests --exclude-module numpy.tests --exclude-module PIL.ImageQt --exclude-module PyQt5 --exclude-module PySide2 --exclude-module PySide6 --exclude-module tkinter.tix --exclude-module sqlalchemy --exclude-module psycopg2 --exclude-module cx_Oracle --exclude-module pyodbc --clean --noconfirm gui_app.py)",
+      "Bash(cd \"e:/Trae_Project/碳纳米管生产数据分析\" && ls -lh dist/ && rm -rf build *.spec && echo \"done\")",
+      "Bash(.venv/Scripts/python -c ' *)"
+    ],
+    "additionalDirectories": [
+      "E:\\Trae_Project\\碳纳米管生产数据分析"
     ]
   }
 }

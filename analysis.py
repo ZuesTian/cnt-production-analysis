@@ -16,6 +16,7 @@ SOURCE_COLUMNS 中的映射。
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -32,6 +33,7 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.font_manager as font_manager
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -102,6 +104,26 @@ PREFERRED_CHINESE_FONTS = [
     "Arial Unicode MS",
 ]
 
+CHART_SURFACE = "#FFFFFF"
+CHART_TEXT = "#18232F"
+CHART_MUTED = "#667085"
+CHART_GRID = "#E5EBF0"
+CHART_BORDER = "#CBD5E1"
+CHART_COLORS = {
+    "production": "#177E76",
+    "yield": "#B76E00",
+    "reaction": "#2F66A3",
+    "fault": "#C43C39",
+    "empty_burn": "#D99224",
+    "clean": "#7657A6",
+    "neutral": "#64748B",
+    "threshold": "#D92D20",
+    "highlight": "#F97316",
+    "highlight_alt": "#2563EB",
+    "low": "#C43C39",
+    "ok": "#177E76",
+}
+
 
 def configure_chinese_fonts() -> None:
     available_fonts = {font.name for font in font_manager.fontManager.ttflist}
@@ -113,6 +135,64 @@ def configure_chinese_fonts() -> None:
 
 
 configure_chinese_fonts()
+
+
+def _axes_list(axes) -> list:
+    return list(np.ravel(np.asarray(axes, dtype=object)))
+
+
+def _style_axis(ax, grid_axis: str | None = "y") -> None:
+    ax.set_facecolor(CHART_SURFACE)
+    ax.tick_params(axis="both", colors=CHART_MUTED, labelsize=9)
+    ax.title.set_color(CHART_TEXT)
+    ax.xaxis.label.set_color(CHART_MUTED)
+    ax.yaxis.label.set_color(CHART_MUTED)
+    if grid_axis:
+        ax.grid(axis=grid_axis, color=CHART_GRID, linewidth=0.8, alpha=1.0)
+    ax.set_axisbelow(True)
+    for name, spine in ax.spines.items():
+        spine.set_color(CHART_BORDER)
+        spine.set_linewidth(0.8)
+        if name in {"top", "right"}:
+            spine.set_visible(False)
+    with contextlib.suppress(Exception):
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=6))
+
+
+def _style_figure(fig, axes, grid_axis: str | None = "y") -> None:
+    fig.patch.set_facecolor(CHART_SURFACE)
+    for ax in _axes_list(axes):
+        _style_axis(ax, grid_axis=grid_axis)
+
+
+def _style_legend(legend) -> None:
+    if legend is None:
+        return
+    frame = legend.get_frame()
+    frame.set_facecolor("#FFFFFF")
+    frame.set_edgecolor(CHART_BORDER)
+    frame.set_linewidth(0.8)
+    for text in legend.get_texts():
+        text.set_color(CHART_TEXT)
+
+
+def _format_date_axis(ax, *, max_ticks: int = 10) -> None:
+    locator = mdates.AutoDateLocator(minticks=4, maxticks=max_ticks)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+
+
+def _save_or_buffer_figure(fig, output_path: Path | None) -> Path | io.BytesIO:
+    if output_path is None:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return output_path
 
 
 def configured_min_yield_rate() -> float | None:
@@ -140,9 +220,6 @@ class AnalysisOutputs:
     furnace_daily_workbook: Path | None = None
     furnace_daily_chart_dir: Path | None = None
     anomaly_workbook: Path | None = None
-    fault_workbook: Path | None = None
-    fault_heatmap: Path | None = None
-    fault_warning_workbook: Path | None = None
 
 
 def find_input_file(path_arg: str | None = None) -> Path:
@@ -343,25 +420,8 @@ def add_weighted_average_yield(df: pd.DataFrame, output_col: str = "总产量", 
 
 
 def build_reaction_cycles(raw: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate cleaned rows into one cycle per date + production line + furnace."""
-    group_cols = ["日期", "年月", "月份", "生产线", "炉号"]
-    cycles = (
-        raw.groupby(group_cols, as_index=False)
-        .agg(
-            班组=("班组", join_unique),
-            反应时间=("反应时间", sum_with_nan),
-            空烧时间=("空烧时间", "sum"),
-            降清时间=("降清时间", "sum"),
-            故障时间=("故障时间", "sum"),
-            产量=("产量", sum_with_nan),
-            源表小时产能=("源表小时产能", "mean"),
-            原始记录数=("来源行号", "count"),
-            来源工作表=("来源工作表", join_unique),
-            来源行号=("来源行号", join_line_numbers),
-        )
-        .sort_values(["日期", "生产线", "炉号"])
-        .reset_index(drop=True)
-    )
+    """Each cleaned row = one reaction cycle (one start-run-stop per shift)."""
+    cycles = raw.copy()
     cycles["产率"] = cycles["产量"] / cycles["反应时间"]
     cycles.loc[~np.isfinite(cycles["产率"]), "产率"] = np.nan
     cycles["周期序号"] = cycles.groupby("炉号").cumcount() + 1
@@ -381,7 +441,6 @@ def build_reaction_cycles(raw: pd.DataFrame) -> pd.DataFrame:
         "产量",
         "产率",
         "源表小时产能",
-        "原始记录数",
         "来源工作表",
         "来源行号",
     ]
@@ -720,51 +779,45 @@ def plot_furnace_stats_chart(cycles: pd.DataFrame, output_path: Path | None = No
     x_labels = region_avg["年月"].tolist()
 
     fig, axes = plt.subplots(2, 1, figsize=(15, 8.5), sharex=True, gridspec_kw={"height_ratios": [1.15, 1]})
+    _style_figure(fig, axes)
 
     time_colors = {
-        "平均反应时间": "#2F6DB5",
-        "平均空烧时间": "#D18B1F",
-        "平均降清时间": "#7A4FB0",
-        "平均故障时间": "#C43C39",
+        "平均反应时间": CHART_COLORS["reaction"],
+        "平均空烧时间": CHART_COLORS["empty_burn"],
+        "平均降清时间": CHART_COLORS["clean"],
+        "平均故障时间": CHART_COLORS["fault"],
     }
     for metric, color in time_colors.items():
         axes[0].plot(x_plot, region_avg[metric], marker="o", linewidth=2.0, markersize=5, label=metric, color=color)
 
     axes[0].set_title(f"{prefix}炉子级月度平均统计", fontsize=15, fontweight="bold")
-    axes[0].set_ylabel("平均时间")
-    axes[0].grid(axis="y", alpha=0.25)
-    axes[0].legend(loc="upper left", ncol=2)
+    axes[0].set_ylabel("平均时间 (h)")
+    _style_legend(axes[0].legend(loc="upper left", ncol=2))
 
-    yield_bars = axes[1].bar(x_plot, region_avg["平均产率"], color="#3E8E7E", alpha=0.8, label="加权平均产率")
+    yield_bars = axes[1].bar(x_plot, region_avg["平均产率"], color=CHART_COLORS["production"], alpha=0.86, label="加权平均产率")
     if len(yield_bars) <= 12:
         axes[1].bar_label(yield_bars, fmt="%.1f", fontsize=9, padding=4)
     min_rate = configured_min_yield_rate()
     if min_rate is not None:
-        axes[1].axhline(min_rate, color="#D62828", linestyle="--", linewidth=1.4, alpha=0.85, label=f"最低产率阈值 {min_rate:g}")
-    axes[1].set_ylabel("平均产率")
-    axes[1].grid(axis="y", alpha=0.25)
-    axes[1].legend(loc="upper left")
+        axes[1].axhline(min_rate, color=CHART_COLORS["threshold"], linestyle="--", linewidth=1.4, alpha=0.85, label=f"最低产率阈值 {min_rate:g}")
+    axes[1].set_ylabel("平均产率 (kg/h)")
+    _style_legend(axes[1].legend(loc="upper left"))
 
     ax_count = axes[1].twinx()
-    ax_count.plot(x_plot, region_avg["反应周期数"], color="#6B7785", linestyle="--", marker="s", linewidth=1.8, label="反应周期数")
+    _style_axis(ax_count, grid_axis=None)
+    ax_count.spines["right"].set_visible(True)
+    ax_count.plot(x_plot, region_avg["反应周期数"], color=CHART_COLORS["neutral"], linestyle="--", marker="s", linewidth=1.8, label="反应周期数")
     ax_count.set_ylabel("反应周期数")
-    ax_count.legend(loc="upper right")
+    _style_legend(ax_count.legend(loc="upper right"))
 
     axes[1].set_xticks(x_plot)
     axes[1].set_xticklabels(x_labels)
     axes[1].set_xlabel("年月")
     fig.tight_layout()
-    if output_path is None:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  炉子级统计图已保存：{output_path}")
-    return output_path
+    result = _save_or_buffer_figure(fig, output_path)
+    if output_path is not None:
+        print(f"  炉子级统计图已保存：{output_path}")
+    return result
 
 
 def run_furnace_stats(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
@@ -868,6 +921,7 @@ def plot_summary_trend(summary: pd.DataFrame, x_col: str, title: str, output_pat
     if output_path:
         print(f"正在生成趋势图：{output_path}")
     fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True, gridspec_kw={"height_ratios": [1, 1.2]})
+    _style_figure(fig, axes)
 
     x_values = summary[x_col]
     if x_col == "日期":
@@ -875,41 +929,40 @@ def plot_summary_trend(summary: pd.DataFrame, x_col: str, title: str, output_pat
     else:
         x_plot = np.arange(len(summary))
 
-    bars = axes[0].bar(x_plot, summary["总产量"], color="#3E8E7E", alpha=0.78, label="总产量")
+    bars = axes[0].bar(x_plot, summary["总产量"], color=CHART_COLORS["production"], alpha=0.86, label="总产量")
     if len(bars) <= 12:
         axes[0].bar_label(bars, fmt="%.0f", fontsize=9, padding=4)
     axes[0].set_ylabel("总产量")
     axes[0].set_title(title, fontsize=15, fontweight="bold")
-    axes[0].grid(axis="y", alpha=0.25)
-    axes[0].legend(loc="upper left")
+    _style_legend(axes[0].legend(loc="upper left"))
 
     if "平均产率" not in summary.columns and {"总产量", "总反应时间"} <= set(summary.columns):
         summary = add_weighted_average_yield(summary.copy())
     if "平均产率" in summary.columns:
         ax_yield = axes[0].twinx()
-        ax_yield.plot(x_plot, summary["平均产率"], color="#B25E00", marker="o", linewidth=2.0, markersize=4, label="加权平均产率")
+        _style_axis(ax_yield, grid_axis=None)
+        ax_yield.spines["right"].set_visible(True)
+        ax_yield.plot(x_plot, summary["平均产率"], color=CHART_COLORS["yield"], marker="o", linewidth=2.0, markersize=4, label="加权平均产率")
         min_rate = configured_min_yield_rate()
         if min_rate is not None:
-            ax_yield.axhline(min_rate, color="#D62828", linestyle="--", linewidth=1.3, alpha=0.75, label=f"最低产率阈值 {min_rate:g}")
-        ax_yield.set_ylabel("平均产率")
-        ax_yield.legend(loc="upper right")
+            ax_yield.axhline(min_rate, color=CHART_COLORS["threshold"], linestyle="--", linewidth=1.3, alpha=0.75, label=f"最低产率阈值 {min_rate:g}")
+        ax_yield.set_ylabel("平均产率 (kg/h)")
+        _style_legend(ax_yield.legend(loc="upper right"))
 
     colors = {
-        "总反应时间": "#2F6DB5",
-        "总故障时间": "#C43C39",
-        "总空烧时间": "#D18B1F",
-        "总降清时间": "#7A4FB0",
+        "总反应时间": CHART_COLORS["reaction"],
+        "总故障时间": CHART_COLORS["fault"],
+        "总空烧时间": CHART_COLORS["empty_burn"],
+        "总降清时间": CHART_COLORS["clean"],
     }
     for metric in TIME_SUMMARY_METRICS:
         axes[1].plot(x_plot, summary[metric], marker="o", linewidth=1.8, markersize=4, label=metric, color=colors[metric])
 
-    axes[1].set_ylabel("时间")
-    axes[1].grid(axis="y", alpha=0.25)
-    axes[1].legend(loc="upper left", ncol=2)
+    axes[1].set_ylabel("时间 (h)")
+    _style_legend(axes[1].legend(loc="upper left", ncol=2))
 
     if x_col == "日期":
-        axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-        axes[1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+        _format_date_axis(axes[1], max_ticks=10)
         fig.autofmt_xdate(rotation=45)
     else:
         axes[1].set_xticks(x_plot)
@@ -917,16 +970,10 @@ def plot_summary_trend(summary: pd.DataFrame, x_col: str, title: str, output_pat
 
     axes[1].set_xlabel(x_col)
     fig.tight_layout()
-    if output_path is None:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  趋势图已保存：{output_path}")
-    return output_path
+    result = _save_or_buffer_figure(fig, output_path)
+    if output_path is not None:
+        print(f"  趋势图已保存：{output_path}")
+    return result
 
 
 def safe_file_part(value: object) -> str:
@@ -951,7 +998,6 @@ def furnace_daily_trend_data(cycles: pd.DataFrame, furnace_list: list[str] | Non
         "故障时间",
         "产量",
         "产率",
-        "原始记录数",
         "来源工作表",
         "来源行号",
     ]
@@ -1122,6 +1168,41 @@ def yield_anomaly_mask(series: pd.Series) -> pd.Series:
     return (mask | (series < (mean_value - sigma * std_value))).fillna(False)
 
 
+def detect_cycle_boundaries(data: pd.DataFrame, threshold: float = 20.0) -> pd.DataFrame:
+    """Detect cycle boundaries where cumulative 空烧+故障 >= threshold hours."""
+    df = data.sort_values("日期").copy()
+    df["空烧故障合计"] = df["空烧时间"].fillna(0) + df["故障时间"].fillna(0)
+    cumulative = 0.0
+    cycle_id = 1
+    boundaries = []
+    for idx, row in df.iterrows():
+        cumulative += row["空烧故障合计"]
+        df.at[idx, "累计空闲"] = cumulative
+        df.at[idx, "周期编号"] = cycle_id
+        boundaries.append(False)
+        if cumulative >= threshold:
+            boundaries[-1] = True
+            cumulative = 0.0
+            cycle_id += 1
+    df["周期边界"] = boundaries
+
+    cycle_stats = (
+        df.groupby("周期编号")
+        .agg(
+            周期开始=("日期", "min"),
+            周期结束=("日期", "max"),
+            周期天数=("日期", lambda x: (x.max() - x.min()).days + 1),
+            周期反应时间=("反应时间", "sum"),
+            周期产量=("产量", "sum"),
+            周期空烧时间=("空烧时间", "sum"),
+            周期故障时间=("故障时间", "sum"),
+            记录数=("周期编号", "count"),
+        )
+        .assign(周期产率=lambda x: (x["周期产量"] / x["周期反应时间"]).round(2))
+    )
+    return cycle_stats
+
+
 def plot_single_furnace_daily_trend(furnace_data: pd.DataFrame, output_path: Path | None = None):
     furnace = furnace_data["炉号"].iloc[0]
     line = furnace_data["生产线"].iloc[0]
@@ -1133,21 +1214,23 @@ def plot_single_furnace_daily_trend(furnace_data: pd.DataFrame, output_path: Pat
         plot_data[col] = plot_data[col].fillna(0)
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True, gridspec_kw={"height_ratios": [1, 1.15]})
+    _style_figure(fig, axes)
     x_values = plot_data.index
 
-    bars = axes[0].bar(x_values, plot_data["产量"], color="#3E8E7E", alpha=0.78, label="产量")
+    bars = axes[0].bar(x_values, plot_data["产量"], color=CHART_COLORS["production"], alpha=0.86, label="产量")
     if len(bars) <= 12:
         axes[0].bar_label(bars, fmt="%.0f", fontsize=8, padding=3)
     axes[0].set_ylabel("产量")
-    axes[0].grid(axis="y", alpha=0.25)
-    axes[0].legend(loc="upper left")
+    _style_legend(axes[0].legend(loc="upper left"))
 
     ax_yield = axes[0].twinx()
+    _style_axis(ax_yield, grid_axis=None)
+    ax_yield.spines["right"].set_visible(True)
     yield_series = plot_data["产率"].astype(float)
-    ax_yield.plot(x_values, yield_series, color="#B25E00", linewidth=1.7, marker="o", markersize=3, label="产率")
+    ax_yield.plot(x_values, yield_series, color=CHART_COLORS["yield"], linewidth=1.7, marker="o", markersize=3, label="产率")
 
     moving_avg = yield_series.rolling(window=7, min_periods=3).mean()
-    ax_yield.plot(x_values, moving_avg, color="#4C6FFF", linewidth=2.0, label="产率7日均线")
+    ax_yield.plot(x_values, moving_avg, color=CHART_COLORS["highlight_alt"], linewidth=2.0, label="产率7日均线")
 
     valid = yield_series.dropna()
     if len(valid) >= 2:
@@ -1155,27 +1238,27 @@ def plot_single_furnace_daily_trend(furnace_data: pd.DataFrame, output_path: Pat
         valid_mask = yield_series.notna().to_numpy()
         slope, intercept = np.polyfit(x_index[valid_mask], yield_series[valid_mask], 1)
         trend = slope * x_index + intercept
-        ax_yield.plot(x_values, trend, color="#6B7785", linestyle="--", linewidth=1.6, label=f"趋势线({slope:.2f}/天)")
+        ax_yield.plot(x_values, trend, color=CHART_COLORS["neutral"], linestyle="--", linewidth=1.6, label=f"趋势线({slope:.2f}/天)")
 
     anomaly_mask = yield_anomaly_mask(yield_series)
     if anomaly_mask.any():
         ax_yield.scatter(
             x_values[anomaly_mask.to_numpy()],
             yield_series[anomaly_mask],
-            color="#D62828",
+            color=CHART_COLORS["threshold"],
             s=36,
             zorder=5,
             label="异常低产",
         )
 
-    ax_yield.set_ylabel("产率")
-    ax_yield.legend(loc="upper right")
+    ax_yield.set_ylabel("产率 (kg/h)")
+    _style_legend(ax_yield.legend(loc="upper right"))
 
     colors = {
-        "反应时间": "#2F6DB5",
-        "故障时间": "#C43C39",
-        "空烧时间": "#D18B1F",
-        "降清时间": "#7A4FB0",
+        "反应时间": CHART_COLORS["reaction"],
+        "故障时间": CHART_COLORS["fault"],
+        "空烧时间": CHART_COLORS["empty_burn"],
+        "降清时间": CHART_COLORS["clean"],
     }
     for metric, color in colors.items():
         axes[1].plot(x_values, plot_data[metric], marker="o", markersize=3, linewidth=1.6, label=metric, color=color)
@@ -1183,30 +1266,37 @@ def plot_single_furnace_daily_trend(furnace_data: pd.DataFrame, output_path: Pat
     fault_threshold = float(ALERT_THRESHOLDS.get("max_fault_hours_per_day", 24))
     heavy_fault_days = plot_data.index[plot_data["故障时间"] > fault_threshold]
     for day in heavy_fault_days:
-        axes[0].axvline(day, color="#D62828", alpha=0.16, linewidth=1.2)
-        axes[1].axvline(day, color="#D62828", alpha=0.18, linewidth=1.2)
+        axes[0].axvline(day, color=CHART_COLORS["threshold"], alpha=0.16, linewidth=1.2)
+        axes[1].axvline(day, color=CHART_COLORS["threshold"], alpha=0.18, linewidth=1.2)
 
-    axes[1].set_ylabel("时间")
-    axes[1].grid(axis="y", alpha=0.25)
-    axes[1].legend(loc="upper left", ncol=2)
-    axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-    axes[1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+    # 周期边界标注（空烧+故障 >= 20h）
+    try:
+        cycle_stats = detect_cycle_boundaries(data)
+        for _, row in cycle_stats.iterrows():
+            end_date = row["周期结束"]
+            if end_date in plot_data.index:
+                axes[0].axvline(end_date, color=CHART_COLORS["highlight"], alpha=0.35, linewidth=1.8, linestyle="--")
+                axes[1].axvline(end_date, color=CHART_COLORS["highlight"], alpha=0.35, linewidth=1.8, linestyle="--")
+        # 左上角周期统计
+        total_cycles = len(cycle_stats)
+        total_time = cycle_stats["周期反应时间"].sum()
+        avg_yield = (cycle_stats["周期产量"].sum() / total_time).round(1) if total_time > 0 else 0
+        axes[0].text(0.02, 0.95, f"周期数: {total_cycles}  总反应时间: {total_time:.0f}h  总平均产率: {avg_yield}",
+                     transform=axes[0].transAxes, fontsize=8, verticalalignment="top",
+                     bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.86, edgecolor=CHART_BORDER))
+    except Exception:
+        pass
+
+    axes[1].set_ylabel("时间 (h)")
+    _style_legend(axes[1].legend(loc="upper left", ncol=2))
+    _format_date_axis(axes[1], max_ticks=10)
     axes[1].set_xlabel("日期")
 
     title = f"{line} {furnace} 单炉每日趋势"
     fig.suptitle(title, fontsize=15, fontweight="bold")
     fig.autofmt_xdate(rotation=45)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    if output_path is None:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return output_path
+    return _save_or_buffer_figure(fig, output_path)
 
 
 def format_duration(seconds: float) -> str:
@@ -1245,6 +1335,287 @@ def run_furnace_daily_trends(cycles: pd.DataFrame, furnace_list: list[str] | Non
     workbook, trend_data = write_furnace_daily_trend_data(cycles, furnace_list)
     chart_dir, chart_paths = plot_furnace_daily_trends(trend_data, prefix)
     return workbook, chart_dir, chart_paths
+
+
+def plot_furnace_yield_comparison(cycles: pd.DataFrame, output_path: Path | None = None,
+                                   furnace_list: list[str] | None = None,
+                                   start_date=None, end_date=None) -> Path | io.BytesIO:
+    """Bar chart: x=furnace, y=average yield rate over selected date range."""
+    data = select_cycles(cycles, furnace_list)
+    if start_date is not None:
+        data = data[data["日期"] >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        data = data[data["日期"] <= pd.Timestamp(end_date)]
+    avg = data.groupby("炉号")["产率"].mean().sort_values().dropna()
+    if avg.empty:
+        raise ValueError("所选范围无有效产率数据")
+
+    fig_width = min(18, max(10, len(avg) * 0.12 + 8))
+    fig_height = min(24, max(6, len(avg) * 0.22 + 2.8))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    _style_axis(ax, grid_axis="x")
+    colors = [CHART_COLORS["low"] if v < avg.median() else CHART_COLORS["ok"] for v in avg.values]
+    ax.barh(avg.index, avg.values, color=colors, alpha=0.88)
+    ax.axvline(avg.mean(), color=CHART_COLORS["reaction"], linestyle="--", linewidth=1.5, label=f"总平均 {avg.mean():.1f}")
+    ax.set_xlabel("平均产率 (kg/h)")
+    ax.set_title(f"炉号平均产率对比（{len(avg)} 个炉子）", fontsize=14, fontweight="bold")
+    _style_legend(ax.legend())
+    fig.tight_layout()
+
+    return _save_or_buffer_figure(fig, output_path)
+
+
+def plot_daily_furnace_yield_comparison(cycles: pd.DataFrame, output_path: Path | None = None,
+                                         furnace_list: list[str] | None = None) -> Path | io.BytesIO:
+    """Line chart: each furnace's daily yield rate over time for comparison."""
+    data = select_cycles(cycles, furnace_list)
+    daily = data.pivot_table(index="日期", columns="炉号", values="产率", aggfunc="mean")
+    if daily.empty:
+        raise ValueError("无有效产率数据")
+
+    fig, ax = plt.subplots(figsize=(16, 7))
+    _style_axis(ax, grid_axis="y")
+    colors = plt.cm.tab20(np.linspace(0, 1, min(20, len(daily.columns))))
+    plotted = 0
+    for i, furnace in enumerate(daily.columns):
+        series = daily[furnace].dropna()
+        if len(series) >= 1:
+            ax.plot(series.index, series.values, color=colors[i % 20], linewidth=1.2,
+                    marker=".", markersize=2, alpha=0.8, label=furnace)
+            plotted += 1
+
+    ax.set_title(f"每日多炉产率对比（{len(daily.columns)} 个炉子）", fontsize=14, fontweight="bold")
+    ax.set_ylabel("产率 (kg/h)")
+    legend_cols = min(8, max(1, math.ceil(max(plotted, 1) / 12)))
+    _style_legend(ax.legend(loc="upper left", ncol=legend_cols, fontsize=7, markerscale=2))
+    _format_date_axis(ax, max_ticks=10)
+    fig.autofmt_xdate(rotation=45)
+    fig.tight_layout()
+
+    return _save_or_buffer_figure(fig, output_path)
+
+
+def plot_yield_heatmap(cycles: pd.DataFrame, output_path: Path | None = None,
+                        furnace_list: list[str] | None = None,
+                        value_col: str = "产率") -> Path | io.BytesIO:
+    """产率热力图：X=日期, Y=炉号, 颜色=产率，替代拥挤折线"""
+    data = select_cycles(cycles, furnace_list)
+    pivot = data.pivot_table(index="炉号", columns="日期", values=value_col, aggfunc="mean")
+    pivot = pivot.sort_index()
+
+    fig_h = max(7, min(28, 0.22 * len(pivot.index) + 3))
+    fig_w = max(12, min(28, 0.18 * len(pivot.columns) + 5))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    heatmap = ax.imshow(pivot.to_numpy(), aspect="auto", cmap="RdYlGn", interpolation="bilinear")
+
+    y_step = max(1, len(pivot.index) // 40)
+    ax.set_yticks(np.arange(0, len(pivot.index), y_step))
+    ax.set_yticklabels(pivot.index[::y_step], fontsize=8)
+    x_step = max(1, len(pivot.columns) // 14)
+    ax.set_xticks(np.arange(0, len(pivot.columns), x_step))
+    ax.set_xticklabels([pd.Timestamp(pivot.columns[i]).strftime("%m/%d") for i in range(0, len(pivot.columns), x_step)],
+                       rotation=45, ha="right", fontsize=8)
+
+    cbar = fig.colorbar(heatmap, ax=ax)
+    cbar.set_label(value_col)
+    ax.set_title(f"多炉{value_col}热力图（{len(pivot.index)}炉 × {len(pivot.columns)}天）", fontsize=14, fontweight="bold")
+    ax.set_xlabel("日期")
+    ax.set_ylabel("炉号")
+    _style_axis(ax, grid_axis=None)
+    fig.tight_layout()
+    return _save_or_buffer_figure(fig, output_path)
+
+
+def plot_cycle_heatmap(cycles: pd.DataFrame, output_path: Path | None = None,
+                        furnace_list: list[str] | None = None,
+                        value_col: str = "反应时间") -> Path | io.BytesIO:
+    """周期热力图：X=日期, Y=炉号, 颜色=周期指标，直观发现异常模式"""
+    data = select_cycles(cycles, furnace_list)
+    pivot = data.pivot_table(index="炉号", columns="日期", values=value_col, aggfunc="sum")
+    pivot = pivot.sort_index()
+
+    fig_h = max(7, min(28, 0.22 * len(pivot.index) + 3))
+    fig_w = max(12, min(28, 0.18 * len(pivot.columns) + 5))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    heatmap = ax.imshow(pivot.to_numpy(), aspect="auto", cmap="YlOrRd", interpolation="bilinear")
+
+    y_step = max(1, len(pivot.index) // 40)
+    ax.set_yticks(np.arange(0, len(pivot.index), y_step))
+    ax.set_yticklabels(pivot.index[::y_step], fontsize=8)
+    x_step = max(1, len(pivot.columns) // 14)
+    ax.set_xticks(np.arange(0, len(pivot.columns), x_step))
+    ax.set_xticklabels([pd.Timestamp(pivot.columns[i]).strftime("%m/%d") for i in range(0, len(pivot.columns), x_step)],
+                       rotation=45, ha="right", fontsize=8)
+
+    cbar = fig.colorbar(heatmap, ax=ax)
+    cbar.set_label(f"{value_col} (h)" if "时间" in value_col else value_col)
+    ax.set_title(f"周期{value_col}热力图（{len(pivot.index)}炉 × {len(pivot.columns)}天）", fontsize=14, fontweight="bold")
+    ax.set_xlabel("日期")
+    ax.set_ylabel("炉号")
+    _style_axis(ax, grid_axis=None)
+    fig.tight_layout()
+    return _save_or_buffer_figure(fig, output_path)
+
+
+def plot_cycle_time_distribution(cycles: pd.DataFrame, output_path: Path | None = None,
+                                   furnace_list: list[str] | None = None) -> Path | io.BytesIO:
+    """周期工作时间分布：直方图 + 箱线图"""
+    data = select_cycles(cycles, furnace_list)
+    stats = detect_cycle_boundaries(data)
+    if stats.empty:
+        raise ValueError("无有效周期数据")
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    _style_figure(fig, axes)
+    times = stats["周期反应时间"].dropna()
+
+    # 1. 反应时间直方图
+    axes[0, 0].hist(times, bins=min(30, max(5, len(times) // 5)), color=CHART_COLORS["production"], alpha=0.86, edgecolor="white")
+    axes[0, 0].axvline(times.mean(), color=CHART_COLORS["threshold"], linestyle="--", linewidth=1.5, label=f"均值 {times.mean():.1f}h")
+    axes[0, 0].axvline(times.median(), color=CHART_COLORS["reaction"], linestyle="--", linewidth=1.5, label=f"中位 {times.median():.1f}h")
+    axes[0, 0].set_title("周期反应时间分布", fontsize=13, fontweight="bold")
+    axes[0, 0].set_xlabel("反应时间 (h)")
+    axes[0, 0].set_ylabel("周期数")
+    _style_legend(axes[0, 0].legend(fontsize=8))
+
+    # 2. 周期天数直方图
+    days = stats["周期天数"].dropna()
+    axes[0, 1].hist(days, bins=min(20, max(3, len(days) // 5)), color=CHART_COLORS["empty_burn"], alpha=0.86, edgecolor="white")
+    axes[0, 1].axvline(days.mean(), color=CHART_COLORS["threshold"], linestyle="--", linewidth=1.5, label=f"均值 {days.mean():.1f}天")
+    axes[0, 1].set_title("周期天数分布", fontsize=13, fontweight="bold")
+    axes[0, 1].set_xlabel("天数")
+    axes[0, 1].set_ylabel("周期数")
+    _style_legend(axes[0, 1].legend(fontsize=8))
+
+    # 3. 产率分布直方图
+    yields = stats["周期产率"].dropna()
+    axes[1, 0].hist(yields, bins=min(30, max(5, len(yields) // 5)), color=CHART_COLORS["clean"], alpha=0.86, edgecolor="white")
+    axes[1, 0].axvline(yields.mean(), color=CHART_COLORS["threshold"], linestyle="--", linewidth=1.5, label=f"均值 {yields.mean():.1f}")
+    axes[1, 0].set_title("周期产率分布", fontsize=13, fontweight="bold")
+    axes[1, 0].set_xlabel("产率 (kg/h)")
+    axes[1, 0].set_ylabel("周期数")
+    _style_legend(axes[1, 0].legend(fontsize=8))
+
+    # 4. 统计摘要文本
+    axes[1, 1].axis("off")
+    total_cycles = len(stats)
+    summary_lines = [
+        f"周期总数: {total_cycles}",
+        f"平均反应时间: {times.mean():.1f} h",
+        f"反应时间中位: {times.median():.1f} h",
+        f"反应时间标准差: {times.std():.1f} h",
+        f"最短/最长反应时间: {times.min():.1f} / {times.max():.1f} h",
+        "",
+        f"平均周期天数: {days.mean():.1f} 天",
+        f"最短/最长天数: {days.min():.0f} / {days.max():.0f} 天",
+        "",
+        f"平均周期产率: {yields.mean():.1f} kg/h",
+        f"周期总产量: {stats['周期产量'].sum():.0f} kg",
+    ]
+    for i, line in enumerate(summary_lines):
+        axes[1, 1].text(0.05, 0.95 - i * 0.08, line, transform=axes[1, 1].transAxes,
+                        fontsize=11, color=CHART_TEXT,
+                        fontweight="bold" if i == 0 else "normal")
+
+    fig.suptitle(f"周期工作时间分布（{total_cycles} 个周期）", fontsize=15, fontweight="bold", y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+
+    return _save_or_buffer_figure(fig, output_path)
+
+
+def plot_3d_yield_comparison(cycles: pd.DataFrame, output_path: Path | None = None,
+                              furnace_list: list[str] | None = None,
+                              start_date=None, end_date=None,
+                              highlight_furnace: str | None = None,
+                              highlight_date=None) -> Path | io.BytesIO:
+    """3D bar chart: X=date, Y=furnace, Z=yield rate. Supports highlight."""
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    data = select_cycles(cycles, furnace_list)
+    if start_date is not None:
+        data = data[data["日期"] >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        data = data[data["日期"] <= pd.Timestamp(end_date)]
+
+    dates = [pd.Timestamp(value).normalize() for value in sorted(data["日期"].dropna().unique())]
+    furnaces = sorted(data["炉号"].dropna().unique())
+    if len(dates) < 2 or len(furnaces) < 2:
+        raise ValueError("需要至少2个日期和2个炉子来生成三维图")
+
+    date_map = {d: i for i, d in enumerate(dates)}
+    daily = data.pivot_table(index="日期", columns="炉号", values="产率", aggfunc="mean").reindex(dates)[furnaces]
+
+    fig = plt.figure(figsize=(16, 9))
+    fig.patch.set_facecolor(CHART_SURFACE)
+    ax = fig.add_subplot(111, projection="3d")
+    ax.view_init(elev=28, azim=-55)
+
+    xpos, ypos = np.meshgrid(np.arange(len(dates)), np.arange(len(furnaces)), indexing="ij")
+    xpos, ypos = xpos.ravel(), ypos.ravel()
+    zpos = np.zeros_like(xpos)
+    dz = np.array([daily.iloc[xi, yi] if pd.notna(daily.iloc[xi, yi]) else 0
+                   for xi, yi in zip(xpos, ypos)])
+    dx = dy = 0.65
+
+    # 梯度颜色映射
+    valid_dz = dz[dz > 0]
+    vmin, vmax = (np.percentile(valid_dz, 5), np.percentile(valid_dz, 95)) if len(valid_dz) > 0 else (0, 100)
+    cmap = plt.cm.viridis
+    hl_date_idx = -1
+    if highlight_date:
+        hl_date_idx = date_map.get(pd.Timestamp(highlight_date).normalize(), -1)
+
+    bar_colors = []
+    for i, (xi, yi, z) in enumerate(zip(xpos, ypos, dz)):
+        is_hl_furn = highlight_furnace and furnaces[yi] == highlight_furnace
+        is_hl_date = xi == hl_date_idx
+        if z <= 0:
+            bar_colors.append("#EAEAEA")
+        elif is_hl_furn and is_hl_date:
+            bar_colors.append(CHART_COLORS["threshold"])
+        elif is_hl_furn:
+            bar_colors.append(CHART_COLORS["highlight"])
+        elif is_hl_date:
+            bar_colors.append(CHART_COLORS["highlight_alt"])
+        else:
+            bar_colors.append(cmap((z - vmin) / (vmax - vmin + 0.001)))
+
+    ax.bar3d(xpos, ypos, zpos, dx, dy, dz, color=bar_colors, alpha=0.92, shade=True, edgecolor="white", linewidth=0.15)
+
+    # 每7天一个刻度，避免拥挤
+    tick_step = max(1, len(dates) // 12)
+    ax.set_xticks(np.arange(0, len(dates), tick_step))
+    ax.set_xticklabels([dates[i].strftime("%m/%d") for i in range(0, len(dates), tick_step)], fontsize=8, rotation=30)
+    # 每2个炉号一个刻度
+    y_step = max(1, len(furnaces) // 20)
+    ax.set_yticks(np.arange(0, len(furnaces), y_step))
+    ax.set_yticklabels([furnaces[i] for i in range(0, len(furnaces), y_step)], fontsize=8)
+    ax.set_zlabel("产率 (kg/h)", fontsize=10, labelpad=12)
+    ax.set_title(f"多炉每日产率对比（{len(dates)}天 × {len(furnaces)}炉）", fontsize=15, fontweight="bold", pad=20)
+    ax.tick_params(colors=CHART_MUTED, labelsize=8)
+    ax.xaxis.label.set_color(CHART_MUTED)
+    ax.yaxis.label.set_color(CHART_MUTED)
+    ax.zaxis.label.set_color(CHART_MUTED)
+    ax.title.set_color(CHART_TEXT)
+
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor(CHART_BORDER)
+    ax.yaxis.pane.set_edgecolor(CHART_BORDER)
+    ax.zaxis.pane.set_edgecolor(CHART_BORDER)
+    ax.grid(True, alpha=0.15)
+
+    if highlight_furnace:
+        ax.text2D(0.02, 0.97, f"◇ 高亮炉子: {highlight_furnace}", transform=ax.transAxes,
+                  fontsize=10, color=CHART_COLORS["highlight"], fontweight="bold",
+                  bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.88, edgecolor=CHART_BORDER))
+    if highlight_date:
+        ax.text2D(0.02, 0.92, f"◇ 高亮日期: {highlight_date}", transform=ax.transAxes,
+                  fontsize=10, color=CHART_COLORS["highlight_alt"], fontweight="bold",
+                  bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.88, edgecolor=CHART_BORDER))
+
+    fig.subplots_adjust(left=0.03, right=0.98, bottom=0.07, top=0.92)
+    return _save_or_buffer_figure(fig, output_path)
 
 
 def fault_ranking(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> pd.DataFrame:
@@ -1288,15 +1659,19 @@ def plot_fault_heatmap(cycles: pd.DataFrame, output_path: Path | None = None, fu
     data = select_cycles(cycles, furnace_list)
     pivot = data.pivot_table(index="炉号", columns="日期", values="故障时间", aggfunc="sum", fill_value=0)
     pivot = pivot.sort_index()
+    if pivot.empty:
+        raise ValueError("无故障热力图数据")
 
     fig_height = max(7, min(28, 0.18 * len(pivot.index) + 3))
     fig_width = max(12, min(28, 0.16 * len(pivot.columns) + 5))
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig.patch.set_facecolor(CHART_SURFACE)
     heatmap = ax.imshow(pivot.to_numpy(), aspect="auto", cmap="YlOrRd")
 
-    ax.set_title("故障时间热力图", fontsize=15, fontweight="bold")
+    ax.set_title("故障时间热力图", fontsize=15, fontweight="bold", color=CHART_TEXT)
     ax.set_ylabel("炉号")
     ax.set_xlabel("日期")
+    ax.tick_params(axis="both", colors=CHART_MUTED, labelsize=9)
 
     y_step = max(1, math.ceil(len(pivot.index) / 45))
     ax.set_yticks(np.arange(0, len(pivot.index), y_step))
@@ -1307,28 +1682,17 @@ def plot_fault_heatmap(cycles: pd.DataFrame, output_path: Path | None = None, fu
     ax.set_xticks(x_positions)
     ax.set_xticklabels([pd.Timestamp(pivot.columns[i]).strftime("%m/%d") for i in x_positions], rotation=45, ha="right")
 
+    for spine in ax.spines.values():
+        spine.set_color(CHART_BORDER)
+        spine.set_linewidth(0.8)
     cbar = fig.colorbar(heatmap, ax=ax)
-    cbar.set_label("故障时间")
+    cbar.set_label("故障时间 (h)")
+    cbar.ax.tick_params(colors=CHART_MUTED)
     fig.tight_layout()
-    if output_path is None:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  故障热力图已保存：{output_path}")
-    return output_path
-
-
-def run_fault_analysis(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
-    print("\n正在生成故障分析...")
-    prefix = scope_name(furnace_list)
-    output_path = write_fault_analysis_report(cycles, furnace_list)
-    heatmap_path = plot_fault_heatmap(cycles, OUTPUT_DIR / f"故障热力图_{prefix}.png", furnace_list)
-    return output_path, heatmap_path
+    result = _save_or_buffer_figure(fig, output_path)
+    if output_path is not None:
+        print(f"  故障热力图已保存：{output_path}")
+    return result
 
 
 def write_fault_analysis_report(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Path:
@@ -1347,6 +1711,14 @@ def write_fault_analysis_report(cycles: pd.DataFrame, furnace_list: list[str] | 
     return output_path
 
 
+def run_fault_analysis(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
+    print("\n正在生成故障分析...")
+    prefix = scope_name(furnace_list)
+    output_path = write_fault_analysis_report(cycles, furnace_list)
+    heatmap_path = plot_fault_heatmap(cycles, OUTPUT_DIR / f"故障热力图_{prefix}.png", furnace_list)
+    return output_path, heatmap_path
+
+
 def detect_fault_warnings(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     data = select_cycles(cycles, furnace_list).copy()
     warning_hours = float(ALERT_THRESHOLDS.get("fault_warning_hours_per_day", 8))
@@ -1355,7 +1727,6 @@ def detect_fault_warnings(cycles: pd.DataFrame, furnace_list: list[str] | None =
     monthly_hours = float(ALERT_THRESHOLDS.get("monthly_fault_hours_warning", 24))
 
     warnings: list[dict] = []
-
     high_fault = data[data["故障时间"].fillna(0) >= warning_hours].copy()
     for _, row in high_fault.iterrows():
         fault_time = float(row["故障时间"])
@@ -1491,8 +1862,6 @@ def run_all(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Anal
     monthly_workbook, monthly_chart = run_monthly(cycles, furnace_list=furnace_list)
     furnace_daily_workbook, furnace_daily_chart_dir, _ = run_furnace_daily_trends(cycles, furnace_list=furnace_list)
     anomaly_workbook = write_anomaly_report(cycles, furnace_list=furnace_list)
-    fault_workbook, fault_heatmap = run_fault_analysis(cycles, furnace_list=furnace_list)
-    fault_warning_workbook = run_fault_warning(cycles, furnace_list=furnace_list)
     print("\n全部分析完成")
     return AnalysisOutputs(
         furnace_workbook=furnace_workbook,
@@ -1504,9 +1873,6 @@ def run_all(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Anal
         furnace_daily_workbook=furnace_daily_workbook,
         furnace_daily_chart_dir=furnace_daily_chart_dir,
         anomaly_workbook=anomaly_workbook,
-        fault_workbook=fault_workbook,
-        fault_heatmap=fault_heatmap,
-        fault_warning_workbook=fault_warning_workbook,
     )
 
 
