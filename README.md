@@ -141,14 +141,24 @@ alert_thresholds:
 
 ```
 碳纳米管生产数据分析/
-├── analysis.py              # 分析引擎（~2042 行）
-├── gui_app.py               # tkinter 桌面 GUI（~1850 行）
+├── analysis.py              # 核心数据分析引擎
+├── gui_app.py               # GUI 启动入口
+├── analysis_gui/            # tkinter 桌面 GUI 模块化包
+│   ├── app.py               # 主应用类
+│   ├── layout.py            # 界面布局与 UI 组件
+│   ├── state.py             # 应用状态管理
+│   ├── workflow.py          # 业务逻辑与分析工作流
+│   ├── preview.py           # 图表预览窗口
+│   ├── image_support.py     # 图片加载与自适应渲染
+│   ├── constants.py         # 统一定义常量与枚举
+│   ├── utility.py           # 界面相关工具函数
+│   └── platform.py          # 操作系统级兼容处理
 ├── config.yaml              # 外部配置文件
 ├── requirements.txt         # Python 依赖
 ├── tests/
-│   └── test_analysis.py     # 7 项 pytest 测试
+│   └── test_analysis.py     # 核心功能单元测试
 ├── dist/
-│   └── 碳纳米管生产数据分析.exe   # 单文件打包（~52MB）
+│   └── 碳纳米管生产数据分析.exe   # 单文件打包（独立版）
 └── README.md
 ```
 
