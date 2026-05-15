@@ -11,6 +11,7 @@ from tkinter import ttk
 from .constants import (
     ACCENT,
     ACCENT_DARK,
+    APP_TITLE,
     BASE_TK_SCALING,
     BG,
     BORDER,
