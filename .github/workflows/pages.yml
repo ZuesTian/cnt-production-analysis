@@ -41,7 +41,7 @@ jobs:
         env:
           VITE_API_BASE_URL: https://cnt-analysis.47.236.76.214.nip.io
           VITE_BASE_PATH: /cnt-production-analysis/
-          VITE_REQUIRE_API_KEY: 'true'
+          VITE_REQUIRE_API_KEY: 'false'
           VITE_ROUTER_MODE: hash
         run: npm run build
       - name: Configure Pages
