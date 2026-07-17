@@ -3,7 +3,7 @@
 碳纳米管（CNT）生产线数据综合分析工具，包含厂内离线 Web 2.0 工作台、桌面 GUI 和 CLI。Web 端支持不可变数据版本、质量门禁、班次/炉日双粒度、交互图表、后台报表及发布回滚。
 
 **在线前端：** https://zuestian.github.io/cnt-production-analysis/
-> GitHub Pages 托管 Vue 前端，受保护的 FastAPI/SQLite 后端部署在独立 HTTPS 服务。首次访问需要输入运行时访问密钥；密钥不会写入 GitHub 或前端构建产物。
+> GitHub Pages 托管 Vue 前端，FastAPI/SQLite 后端部署在独立 HTTPS 服务。当前临时采用无密钥访问，前端和 API 均位于公网；后续可通过服务器环境变量重新启用访问密钥。
 
 ## 快速开始
 
@@ -19,8 +19,9 @@ python web_app/run_server.py
 跨域部署时可配置：
 
 ```bash
-CNT_API_TOKEN=<运行时访问密钥>
 CNT_ALLOWED_ORIGINS=https://zuestian.github.io
+# 可选：需要访问控制时再设置
+CNT_API_TOKEN=<运行时访问密钥>
 ```
 
 重新开发前端时：
