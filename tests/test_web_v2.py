@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+import csv
+import io
+import sys
+import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import date, timedelta
+from pathlib import Path
+
+import pytest
+import pandas as pd
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB_APP = ROOT / "web_app"
+sys.path.insert(0, str(WEB_APP))
+sys.path.insert(0, str(ROOT))
+
+from main import create_app
+from models import Dataset, ExportArtifact, ShiftRecord, utcnow
+from services.import_service import _similar_operator_pairs
+
+
+SOURCE_COLUMNS = [
+    "日期",
+    "班组",
+    "炉号",
+    "生产时间",
+    "设备故障影响时间",
+    "停机清理空烧",
+    "产量",
+    "小时产能",
+]
+
+
+def test_similar_operator_names_are_only_reported_as_review_hints() -> None:
+    pairs = _similar_operator_pairs(pd.Series(["张晓明", "张小明", "王强", "王刚"]))
+
+    assert ["张小明", "张晓明"] in pairs
+    assert ["王刚", "王强"] not in pairs
+
+
+def source_rows(output_offset: float = 0) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    start = date(2026, 1, 1)
+    for day_index in range(10):
+        day = (start + timedelta(days=day_index)).isoformat()
+        rows.extend(
+            [
+                {
+                    "日期": day,
+                    "班组": "白班 张三",
+                    "炉号": "E01",
+                    "生产时间": 2,
+                    "设备故障影响时间": 0,
+                    "停机清理空烧": 0,
+                    "产量": 100 + output_offset,
+                    "小时产能": 50,
+                },
+                {
+                    "日期": day,
+                    "班组": "夜班\n李四",
+                    "炉号": "E02",
+                    "生产时间": 8,
+                    "设备故障影响时间": 13 if day_index == 8 else 0,
+                    "停机清理空烧": 2 if day_index == 8 else 0,
+                    "产量": 800 + output_offset,
+                    "小时产能": 100,
+                },
+                {
+                    "日期": day,
+                    "班组": "白班王五",
+                    "炉号": "11A-01",
+                    "生产时间": 5,
+                    "设备故障影响时间": 0,
+                    "停机清理空烧": 0,
+                    "产量": 350 + output_offset,
+                    "小时产能": 70,
+                },
+            ]
+        )
+        # The latest 11A date contains one row instead of the historical two;
+        # it must not be treated as a complete comparison day.
+        if day_index < 9:
+            rows.append(
+                {
+                    "日期": day,
+                    "班组": "夜班赵六",
+                    "炉号": "11A-02",
+                    "生产时间": 5,
+                    "设备故障影响时间": 0,
+                    "停机清理空烧": 0,
+                    "产量": 400 + output_offset,
+                    "小时产能": 80,
+                }
+            )
+    rows.append(
+        {
+            "日期": "not-a-date",
+            "班组": "白班待核对",
+            "炉号": "E99",
+            "生产时间": 8,
+            "设备故障影响时间": 0,
+            "停机清理空烧": 0,
+            "产量": 600,
+            "小时产能": 75,
+        }
+    )
+    return rows
+
+
+def csv_bytes(rows: list[dict[str, object]]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=SOURCE_COLUMNS)
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def wait_job(client: TestClient, job_id: str, timeout: float = 20) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        job = response.json()
+        if job["status"] in {"completed", "failed", "cancelled"}:
+            return job
+        time.sleep(0.05)
+    raise AssertionError("background job timed out")
+
+
+def import_dataset(client: TestClient, rows: list[dict[str, object]], kind: str = "temporary", filename: str = "sample.csv") -> tuple[str, dict]:
+    response = client.post(
+        "/api/v1/datasets/imports",
+        files={"file": (filename, csv_bytes(rows), "text/csv")},
+        data={"kind": kind, "name": f"test-{time.time_ns()}"},
+    )
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    job = wait_job(client, payload["job_id"])
+    assert job["status"] == "completed", job.get("error_detail")
+    return payload["dataset_id"], job
+
+
+def publish_dataset(client: TestClient, dataset_id: str, activate: bool = False) -> dict:
+    quality = client.get(f"/api/v1/datasets/{dataset_id}/quality").json()
+    high_codes = [item["code"] for item in quality["issues"] if item["severity"] == "high"]
+    response = client.post(
+        f"/api/v1/datasets/{dataset_id}/{'activate' if activate else 'publish'}",
+        json={
+            "confirm": True,
+            "complete_dates": quality["dataset"]["complete_dates"],
+            "acknowledged_issue_codes": high_codes,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.fixture()
+def app_client(tmp_path: Path):
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+    with TestClient(app) as client:
+        yield app, client
+
+
+def test_import_quality_dual_grain_and_weighted_overview(app_client) -> None:
+    _app, client = app_client
+    dataset_id, import_job = import_dataset(client, source_rows())
+
+    job_batch = client.post("/api/v1/jobs", json={"ids": [import_job["id"]]})
+    assert job_batch.status_code == 200
+    assert [item["id"] for item in job_batch.json()] == [import_job["id"]]
+    assert len(client.get("/api/v1/datasets?limit=1&offset=0").json()) == 1
+    assert client.get("/api/v1/datasets?limit=1&offset=1").json() == []
+
+    quality_response = client.get(f"/api/v1/datasets/{dataset_id}/quality")
+    assert quality_response.status_code == 200
+    quality = quality_response.json()
+    assert quality["dataset"]["row_count"] == 39
+    assert quality["dataset"]["complete_dates"]["11A"] == "2026-01-09"
+    assert any(issue["code"] == "PARTIAL_LATEST_DAY" for issue in quality["issues"])
+    assert any(issue["code"] == "INVALID_DATE" for issue in quality["issues"])
+
+    overview = client.get(f"/api/v1/dashboard/overview?dataset_id={dataset_id}").json()
+    l3 = next(item for item in overview["line_snapshots"] if item["production_line"] == "L3")
+    kpis = {item["key"]: item for item in l3["kpis"]}
+    assert kpis["total_output"]["value"] == pytest.approx(900)
+    assert kpis["weighted_yield"]["value"] == pytest.approx(90)  # not simple mean 75
+    assert kpis["fault_hours"]["value"] == pytest.approx(0)
+    assert overview["common_comparison_date"] == "2026-01-09"
+
+    shift = client.get(f"/api/v1/dashboard/trends?dataset_id={dataset_id}&grain=shift").json()
+    furnace_day = client.get(f"/api/v1/dashboard/trends?dataset_id={dataset_id}&grain=furnace_day").json()
+    assert len(shift["rows"]) > len(furnace_day["rows"])
+    assert all("shift_name" in row for row in shift["rows"])
+    assert all("shift_name" not in row for row in furnace_day["rows"])
+    jan9_l3 = [
+        row for row in shift["rows"]
+        if row["production_date"] == "2026-01-09" and row["production_line"] == "L3"
+    ]
+    assert sum(row["clean_empty_burn_hours"] for row in jan9_l3) == pytest.approx(2)  # one source field, not doubled
+
+    shift_detail = client.get(f"/api/v1/furnaces/E01?dataset_id={dataset_id}&grain=shift").json()
+    day_detail = client.get(f"/api/v1/furnaces/E01?dataset_id={dataset_id}&grain=furnace_day").json()
+    assert "shift_name" in shift_detail["rows"][0]
+    assert "shift_name" not in day_detail["rows"][0]
+
+    fault_diagnostic = client.get(f"/api/v1/diagnostics/faults?dataset_id={dataset_id}&grain=shift").json()
+    distribution = client.get(f"/api/v1/diagnostics/distribution?dataset_id={dataset_id}&grain=furnace_day").json()
+    assert fault_diagnostic["grain"] == "furnace_day"
+    assert distribution["grain"] == "shift"
+
+
+def test_overview_counts_serious_alerts_after_furnace_day_aggregation(app_client) -> None:
+    _app, client = app_client
+    rows = source_rows()
+    latest_l3 = [
+        row for row in rows
+        if row["日期"] == "2026-01-10" and str(row["炉号"]).startswith("E")
+    ]
+    for row in latest_l3:
+        row["炉号"] = "E01"
+        row["设备故障影响时间"] = 7
+    dataset_id, _job = import_dataset(client, rows)
+
+    overview = client.get(f"/api/v1/dashboard/overview?dataset_id={dataset_id}").json()
+    l3 = next(item for item in overview["line_snapshots"] if item["production_line"] == "L3")
+
+    assert l3["serious_alerts"] == 1
+
+
+def test_publish_replace_rollback_and_fault_warning_export(app_client) -> None:
+    _app, client = app_client
+    first_id, _ = import_dataset(client, source_rows(), "shared", "first.csv")
+    publish_dataset(client, first_id)
+    first_output = next(
+        item for item in client.get("/api/v1/dashboard/overview").json()["line_snapshots"]
+        if item["production_line"] == "L3"
+    )["kpis"][0]["value"]
+
+    second_id, _ = import_dataset(client, source_rows(10), "shared", "second.csv")
+    publish_dataset(client, second_id)
+    listed = client.get("/api/v1/datasets").json()
+    assert next(item for item in listed if item["id"] == first_id)["status"] == "archived"
+    assert next(item for item in listed if item["id"] == second_id)["status"] == "published"
+
+    publish_dataset(client, first_id, activate=True)
+    restored_output = next(
+        item for item in client.get("/api/v1/dashboard/overview").json()["line_snapshots"]
+        if item["production_line"] == "L3"
+    )["kpis"][0]["value"]
+    assert restored_output == first_output
+
+    accepted = client.post("/api/v1/exports", json={"dataset_id": first_id, "report_type": "fault_warning"})
+    assert accepted.status_code == 202
+    job = wait_job(client, accepted.json()["job_id"], timeout=30)
+    assert job["status"] == "completed", job.get("error_detail")
+    download = client.get(f"/api/v1/exports/{job['result']['export_id']}/download")
+    assert download.status_code == 200
+    assert download.content.startswith(b"PK")
+
+
+def test_temporary_dataset_isolated_by_http_only_workspace_cookie(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+    with TestClient(app) as owner, TestClient(app) as stranger:
+        dataset_id, _ = import_dataset(owner, source_rows())
+        assert owner.get(f"/api/v1/datasets/{dataset_id}/quality").status_code == 200
+        assert stranger.get(f"/api/v1/datasets/{dataset_id}/quality").status_code == 403
+        assert dataset_id not in {item["id"] for item in stranger.get("/api/v1/datasets").json()}
+        cookie = owner.cookies.get("cnt_workspace")
+        assert cookie and len(cookie) >= 24
+
+        accepted = owner.post(
+            "/api/v1/exports", json={"dataset_id": dataset_id, "report_type": "daily_summary"}
+        )
+        export_job = wait_job(owner, accepted.json()["job_id"])
+        assert export_job["status"] == "completed"
+        export_id = export_job["result"]["export_id"]
+        with app.state.SessionLocal() as session:
+            dataset = session.get(Dataset, dataset_id)
+            source_path = Path(dataset.stored_path)
+            dataset.expires_at = utcnow() - timedelta(seconds=1)
+            artifact = session.get(ExportArtifact, export_id)
+            export_path = Path(artifact.stored_path)
+            session.commit()
+
+        owner.get("/api/v1/datasets")  # triggers bounded expiry cleanup
+        assert not source_path.exists()
+        assert not export_path.exists()
+        with app.state.SessionLocal() as session:
+            assert session.get(Dataset, dataset_id) is None
+            assert session.query(ShiftRecord).filter_by(dataset_id=dataset_id).count() == 0
+            assert session.get(ExportArtifact, export_id) is None
+
+
+def test_upload_limits_signature_and_generated_safe_path(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+    app.state.settings = replace(app.state.settings, max_upload_bytes=128)
+    with TestClient(app) as client:
+        too_large = client.post(
+            "/api/v1/datasets/imports",
+            files={"file": ("large.csv", b"a,b\n" + b"x" * 200, "text/csv")},
+            data={"kind": "temporary"},
+        )
+        assert too_large.status_code == 413
+        assert too_large.json()["code"] == "FILE_TOO_LARGE"
+
+    app = create_app(tmp_path / "runtime2", serve_frontend=False)
+    with TestClient(app) as client:
+        mismatch = client.post(
+            "/api/v1/datasets/imports",
+            files={"file": ("fake.xlsx", b"not an excel workbook", "application/octet-stream")},
+            data={"kind": "temporary"},
+        )
+        assert mismatch.status_code == 415
+        fake_zip = io.BytesIO()
+        with zipfile.ZipFile(fake_zip, "w") as archive:
+            archive.writestr("unrelated.txt", "not a workbook")
+        disguised_zip = client.post(
+            "/api/v1/datasets/imports",
+            files={"file": ("disguised.xlsx", fake_zip.getvalue(), "application/octet-stream")},
+            data={"kind": "temporary"},
+        )
+        assert disguised_zip.status_code == 415
+        assert disguised_zip.json()["code"] == "FILE_FORMAT_MISMATCH"
+        dataset_id, _ = import_dataset(client, source_rows(), filename="../../outside.csv")
+        with app.state.SessionLocal() as session:
+            dataset = session.scalar(select(Dataset).where(Dataset.id == dataset_id))
+            stored = Path(dataset.stored_path).resolve()
+        assert app.state.settings.import_dir.resolve() in stored.parents
+        assert stored.name == f"{dataset_id}.csv"
+
+
+def test_publish_requires_confirmation_and_high_risk_acknowledgement(app_client) -> None:
+    _app, client = app_client
+    dataset_id, _ = import_dataset(client, source_rows(), "shared")
+    no_confirm = client.post(f"/api/v1/datasets/{dataset_id}/publish", json={"confirm": False})
+    assert no_confirm.status_code == 422
+    assert no_confirm.json()["code"] == "CONFIRMATION_REQUIRED"
+    without_ack = client.post(
+        f"/api/v1/datasets/{dataset_id}/publish",
+        json={"confirm": True, "complete_dates": {"L3": "2026-01-10", "11A": "2026-01-09"}},
+    )
+    assert without_ack.status_code == 422
+    assert without_ack.json()["code"] == "QUALITY_ACK_REQUIRED"
+
+
+def test_concurrent_publish_leaves_exactly_one_active_snapshot(app_client) -> None:
+    _app, client = app_client
+    first_id, _ = import_dataset(client, source_rows(1), "shared", "concurrent-a.csv")
+    second_id, _ = import_dataset(client, source_rows(2), "shared", "concurrent-b.csv")
+
+    def payload_for(dataset_id: str) -> dict:
+        report = client.get(f"/api/v1/datasets/{dataset_id}/quality").json()
+        return {
+            "confirm": True,
+            "complete_dates": report["dataset"]["complete_dates"],
+            "acknowledged_issue_codes": [
+                item["code"] for item in report["issues"] if item["severity"] == "high"
+            ],
+        }
+
+    payloads = {first_id: payload_for(first_id), second_id: payload_for(second_id)}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                lambda dataset_id: client.post(
+                    f"/api/v1/datasets/{dataset_id}/publish", json=payloads[dataset_id]
+                ),
+                [first_id, second_id],
+            )
+        )
+    assert [response.status_code for response in responses] == [200, 200]
+    datasets = client.get("/api/v1/datasets").json()
+    relevant = [item for item in datasets if item["id"] in {first_id, second_id}]
+    assert sum(item["status"] == "published" for item in relevant) == 1
+    assert sum(item["status"] == "archived" for item in relevant) == 1

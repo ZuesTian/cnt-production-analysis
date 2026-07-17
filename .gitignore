@@ -5,10 +5,10 @@ __pycache__/
 
 # pytest
 .pytest_cache/
+.pytest-tmp/
 
 # 输出缓存
-output/.cache/
-output/.preview/
+output/
 
 # IDE
 .vscode/
@@ -18,8 +18,22 @@ output/.preview/
 Thumbs.db
 ~$*.xlsx
 dist/
+!web_app/frontend/dist/
+!web_app/frontend/dist/**
 .venv/
 upx.exe
+
+# Web frontend/runtime
+web_app/frontend/node_modules/
+web_app/frontend/test-results/
+web_app/frontend/playwright-report/
+web_app/data/
+web_app/uploads/
+web_app/outputs/
+web_app/output/
+web_app/server.log
+web_app/server-*.log
+.playwright-mcp/
 
 # 生产数据
 *.xlsx

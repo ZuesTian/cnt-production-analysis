@@ -8,9 +8,8 @@
 3. 每月汇总：同每日口径按月汇总，并生成趋势图。
 
 说明：
-原始表只有“停机清理空烧”一列，没有单独的“降清时间”列。本脚本按当前数据口径，
-将该列同时作为“空烧时间”和“降清时间”输出。后续如果源表拆分字段，只需调整
-SOURCE_COLUMNS 中的映射。
+原始表只有“停机清理空烧”一列，没有单独的“降清时间”列。内部口径仅将其计入
+“空烧时间”；为兼容旧 Excel 模板仍保留“降清时间”列，但填 0，避免停机时长重复相加。
 """
 
 from __future__ import annotations
@@ -41,6 +40,13 @@ from openpyxl.utils import get_column_letter
 
 
 OUTPUT_DIR = Path("output")
+
+
+def resolve_output_dir(output_dir: Path | str | None = None) -> Path:
+    """Return an explicit output directory while preserving the CLI default."""
+    target = Path(output_dir) if output_dir is not None else OUTPUT_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 CONFIG_FILE = Path("config.yaml")
 EXCEL_BASE_DATE = datetime(1899, 12, 30)
 SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
@@ -265,6 +271,18 @@ def clean_number(value: object) -> float:
     return pd.to_numeric(text, errors="coerce")
 
 
+def clean_numeric_series(values: pd.Series) -> pd.Series:
+    """Vectorized equivalent of clean_number for full-column imports."""
+    if pd.api.types.is_numeric_dtype(values):
+        return pd.to_numeric(values, errors="coerce")
+    text = values.astype("string").str.strip()
+    text = text.str.replace("..", ".", regex=False)
+    for token in (",", "，", "小时", "kg"):
+        text = text.str.replace(token, "", regex=False)
+    text = text.replace({"": pd.NA, "nan": pd.NA, "none": pd.NA, "-": pd.NA})
+    return pd.to_numeric(text, errors="coerce")
+
+
 def convert_excel_date(value: object) -> pd.Timestamp:
     """Convert Excel serial dates or regular date values to pandas Timestamp."""
     if pd.isna(value):
@@ -277,6 +295,25 @@ def convert_excel_date(value: object) -> pd.Timestamp:
     if pd.isna(parsed):
         return pd.NaT
     return pd.Timestamp(parsed).normalize()
+
+
+def convert_excel_dates(values: pd.Series) -> pd.Series:
+    """Vectorized Excel-serial and text date conversion."""
+    numeric = pd.to_numeric(values, errors="coerce")
+    result = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    numeric_mask = numeric.notna()
+    valid_numeric = numeric_mask & numeric.between(1, 100_000)
+    if valid_numeric.any():
+        result.loc[valid_numeric] = pd.Timestamp(EXCEL_BASE_DATE) + pd.to_timedelta(
+            numeric.loc[valid_numeric], unit="D"
+        )
+    if (~numeric_mask).any():
+        try:
+            parsed = pd.to_datetime(values.loc[~numeric_mask], errors="coerce", format="mixed")
+        except TypeError:
+            parsed = pd.to_datetime(values.loc[~numeric_mask], errors="coerce")
+        result.loc[~numeric_mask] = parsed
+    return result.dt.normalize()
 
 
 def production_line_from_sheet(sheet_name: str) -> str:
@@ -303,6 +340,19 @@ def production_line_from_furnace(furnace: object, fallback: str) -> str:
             if upper_furnace.startswith(str(pattern).upper()):
                 return line
     return fallback
+
+
+def production_lines_from_furnaces(furnaces: pd.Series, fallback: str) -> pd.Series:
+    """Vectorized configured-prefix matching with longest-prefix precedence."""
+    upper = furnaces.astype("string").str.strip().str.upper()
+    result = pd.Series(fallback, index=furnaces.index, dtype="object")
+    configured: list[tuple[int, str, str]] = []
+    for line, settings in PRODUCTION_LINES.items():
+        patterns = settings.get("patterns", []) if isinstance(settings, dict) else []
+        configured.extend((len(str(pattern)), str(pattern).upper(), str(line)) for pattern in patterns)
+    for _length, pattern, line in sorted(configured):
+        result.loc[upper.str.startswith(pattern, na=False)] = line
+    return result
 
 
 def required_usecols(column: str) -> bool:
@@ -357,7 +407,7 @@ def cache_key_for_input(input_file: Path) -> str:
         "mtime_ns": stat.st_mtime_ns,
         "source_columns": SOURCE_COLUMNS,
         "production_lines": PRODUCTION_LINES,
-        "version": 3,
+        "version": 5,
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
@@ -419,6 +469,49 @@ def add_weighted_average_yield(df: pd.DataFrame, output_col: str = "总产量", 
     return df
 
 
+def paired_production_records(data: pd.DataFrame) -> pd.DataFrame:
+    """Return records eligible for yield calculations.
+
+    Output totals may legitimately include rows without reaction time, but a yield
+    numerator and denominator must always come from the same record.  Keeping this
+    rule in one helper prevents legacy Excel/PNG reports from silently drifting
+    away from the Web 2.0 metric definition.
+    """
+    output = pd.to_numeric(data["产量"], errors="coerce")
+    reaction_time = pd.to_numeric(data["反应时间"], errors="coerce")
+    return data.loc[output.notna() & output.ge(0) & reaction_time.notna() & reaction_time.gt(0)].copy()
+
+
+def paired_weighted_yield_by_group(
+    data: pd.DataFrame,
+    group_cols: list[str],
+    value_col: str = "平均产率",
+) -> pd.DataFrame:
+    """Calculate paired weighted yield for each group."""
+    paired = paired_production_records(data)
+    if paired.empty:
+        return pd.DataFrame(columns=[*group_cols, value_col])
+
+    result = (
+        paired.groupby(group_cols, as_index=False, dropna=False)
+        .agg(_配对产量=("产量", "sum"), _配对反应时间=("反应时间", "sum"))
+    )
+    result[value_col] = weighted_yield(result["_配对产量"], result["_配对反应时间"])
+    return result[[*group_cols, value_col]]
+
+
+def merge_paired_weighted_yield(
+    summary: pd.DataFrame,
+    data: pd.DataFrame,
+    group_cols: list[str],
+) -> pd.DataFrame:
+    """Attach the canonical paired weighted yield to an aggregate table."""
+    if "平均产率" in summary.columns:
+        summary = summary.drop(columns="平均产率")
+    paired_yield = paired_weighted_yield_by_group(data, group_cols)
+    return summary.merge(paired_yield, on=group_cols, how="left")
+
+
 def build_reaction_cycles(raw: pd.DataFrame) -> pd.DataFrame:
     """Each cleaned row = one reaction cycle (one start-run-stop per shift)."""
     cycles = raw.copy()
@@ -447,10 +540,10 @@ def build_reaction_cycles(raw: pd.DataFrame) -> pd.DataFrame:
     return cycles[ordered_cols]
 
 
-def load_and_clean_data(input_file: Path) -> pd.DataFrame:
+def load_and_clean_data(input_file: Path, *, use_cache: bool = True) -> pd.DataFrame:
     """Load all relevant sheets and produce one normalized cycle-level table."""
     print(f"正在加载数据：{input_file}")
-    cached = load_cycles_cache(input_file)
+    cached = load_cycles_cache(input_file) if use_cache else None
     if cached is not None:
         print(f"  反应周期记录数：{len(cached)}")
         print(f"  日期范围：{cached['日期'].min().date()} ~ {cached['日期'].max().date()}")
@@ -495,7 +588,7 @@ def load_and_clean_data(input_file: Path) -> pd.DataFrame:
         df["炉号"] = df["炉号"].astype(str).str.strip()
         df = df[(df["炉号"].notna()) & (df["炉号"] != "") & (df["炉号"] != "nan")]
         df = df[~df["炉号"].str.contains("总计", na=False)]
-        df["生产线"] = df["炉号"].map(lambda furnace: production_line_from_furnace(furnace, sheet_line))
+        df["生产线"] = production_lines_from_furnaces(df["炉号"], sheet_line)
 
         frames.append(df)
 
@@ -507,27 +600,35 @@ def load_and_clean_data(input_file: Path) -> pd.DataFrame:
     raw = pd.concat(frames, ignore_index=True)
 
     for col in ["反应时间", "故障时间", "空烧时间", "产量", "源表小时产能"]:
-        raw[col] = raw[col].map(clean_number)
+        raw[col] = clean_numeric_series(raw[col])
 
-    raw["日期"] = raw["日期"].map(convert_excel_date)
+    raw["日期"] = convert_excel_dates(raw["日期"])
+    source_quality = {
+        "source_row_count": int(len(raw)),
+        "invalid_date_count": int(raw["日期"].isna().sum()),
+    }
     raw = raw[raw["日期"].notna()].copy()
     raw["年月"] = raw["日期"].dt.to_period("M").astype(str)
     raw["月份"] = raw["日期"].dt.month
 
     raw["故障时间"] = raw["故障时间"].fillna(0)
     raw["空烧时间"] = raw["空烧时间"].fillna(0)
-    raw["降清时间"] = raw["空烧时间"]
+    # Compatibility column only. The source has one combined cleaning/empty-burn
+    # field, therefore counting it in both columns would double downtime.
+    raw["降清时间"] = 0.0
     raw["产率"] = raw["产量"] / raw["反应时间"]
     raw.loc[~np.isfinite(raw["产率"]), "产率"] = np.nan
 
     raw = raw.sort_values(["日期", "工作表顺序", "来源行号"]).reset_index(drop=True)
     cycles = build_reaction_cycles(raw)
+    cycles.attrs["source_quality"] = source_quality
 
     print(f"  清洗后原始记录数：{len(raw)}")
     print(f"  反应周期记录数：{len(cycles)}")
     print(f"  日期范围：{cycles['日期'].min().date()} ~ {cycles['日期'].max().date()}")
     print(f"  炉号数量：{cycles['炉号'].nunique()}")
-    save_cycles_cache(input_file, cycles)
+    if use_cache:
+        save_cycles_cache(input_file, cycles)
     return cycles
 
 
@@ -612,8 +713,9 @@ def scope_name(furnace_list: list[str] | None) -> str:
 
 
 def monthly_furnace_average(data: pd.DataFrame) -> pd.DataFrame:
+    group_cols = ["年月", "月份", "炉号", "生产线"]
     grouped = (
-        data.groupby(["年月", "月份", "炉号", "生产线"], as_index=False)
+        data.groupby(group_cols, as_index=False)
         .agg(
             反应周期数=("周期序号", "count"),
             平均反应时间=("反应时间", "mean"),
@@ -626,7 +728,7 @@ def monthly_furnace_average(data: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["年月", "生产线", "炉号"])
     )
 
-    grouped["平均产率"] = weighted_yield(grouped["总产量"], grouped["总反应时间"])
+    grouped = merge_paired_weighted_yield(grouped, data, group_cols)
     grouped = grouped.drop(columns=["总产量", "总反应时间"])
     value_cols = [f"平均{metric}" for metric in CYCLE_METRICS]
     grouped[value_cols] = grouped[value_cols].round(2)
@@ -634,8 +736,9 @@ def monthly_furnace_average(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def region_monthly_average(data: pd.DataFrame) -> pd.DataFrame:
+    group_cols = ["年月", "月份"]
     result = (
-        data.groupby(["年月", "月份"], as_index=False)
+        data.groupby(group_cols, as_index=False)
         .agg(
             反应周期数=("周期序号", "count"),
             平均反应时间=("反应时间", "mean"),
@@ -647,7 +750,7 @@ def region_monthly_average(data: pd.DataFrame) -> pd.DataFrame:
         )
         .sort_values("年月")
     )
-    result["平均产率"] = weighted_yield(result["总产量"], result["总反应时间"])
+    result = merge_paired_weighted_yield(result, data, group_cols)
     result = result.drop(columns=["总产量", "总反应时间"])
     value_cols = [f"平均{metric}" for metric in CYCLE_METRICS]
     result[value_cols] = result[value_cols].round(2)
@@ -736,7 +839,11 @@ def autosize_workbook(path: Path) -> None:
     workbook.save(path)
 
 
-def furnace_stats(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Path:
+def furnace_stats(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> Path:
     data = select_cycles(cycles, furnace_list, log_label="炉子级统计")
     prefix = scope_name(furnace_list)
 
@@ -749,7 +856,7 @@ def furnace_stats(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -
     region_avg = region_monthly_average(data)
     rank_results = rank_monthly_top_bottom(monthly_avg)
 
-    output_path = OUTPUT_DIR / f"炉子级统计_{prefix}.xlsx"
+    output_path = resolve_output_dir(output_dir) / f"炉子级统计_{prefix}.xlsx"
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_dataframe(writer, cycle_detail, "反应周期明细")
         write_dataframe(writer, monthly_avg, "月度炉子平均")
@@ -820,10 +927,15 @@ def plot_furnace_stats_chart(cycles: pd.DataFrame, output_path: Path | None = No
     return result
 
 
-def run_furnace_stats(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
-    workbook = furnace_stats(cycles, furnace_list)
+def run_furnace_stats(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, Path]:
+    target_dir = resolve_output_dir(output_dir)
+    workbook = furnace_stats(cycles, furnace_list, target_dir)
     prefix = scope_name(furnace_list)
-    chart = plot_furnace_stats_chart(cycles, OUTPUT_DIR / f"炉子级统计图_{prefix}.png", furnace_list)
+    chart = plot_furnace_stats_chart(cycles, target_dir / f"炉子级统计图_{prefix}.png", furnace_list)
     return workbook, chart
 
 
@@ -848,8 +960,8 @@ def summary_by_day(cycles: pd.DataFrame, furnace_list: list[str] | None = None) 
     }
     daily_all = daily_all.rename(columns=rename_cols)
     daily_line = daily_line.rename(columns=rename_cols)
-    daily_all = add_weighted_average_yield(daily_all)
-    daily_line = add_weighted_average_yield(daily_line)
+    daily_all = merge_paired_weighted_yield(daily_all, data, ["日期"])
+    daily_line = merge_paired_weighted_yield(daily_line, data, ["日期", "生产线"])
     daily_all[SUMMARY_METRICS] = daily_all[SUMMARY_METRICS].round(2)
     daily_line[SUMMARY_METRICS] = daily_line[SUMMARY_METRICS].round(2)
     return daily_all, daily_line
@@ -876,19 +988,23 @@ def summary_by_month(cycles: pd.DataFrame, furnace_list: list[str] | None = None
     }
     monthly_all = monthly_all.rename(columns=rename_cols)
     monthly_line = monthly_line.rename(columns=rename_cols)
-    monthly_all = add_weighted_average_yield(monthly_all)
-    monthly_line = add_weighted_average_yield(monthly_line)
+    monthly_all = merge_paired_weighted_yield(monthly_all, data, ["年月"])
+    monthly_line = merge_paired_weighted_yield(monthly_line, data, ["年月", "生产线"])
     monthly_all[SUMMARY_METRICS] = monthly_all[SUMMARY_METRICS].round(2)
     monthly_line[SUMMARY_METRICS] = monthly_line[SUMMARY_METRICS].round(2)
     return monthly_all, monthly_line
 
 
-def write_daily_summary(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, pd.DataFrame, pd.DataFrame]:
+def write_daily_summary(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, pd.DataFrame, pd.DataFrame]:
     print("\n正在生成每日汇总...")
     daily_all, daily_line = summary_by_day(cycles, furnace_list)
     prefix = scope_name(furnace_list)
 
-    output_path = OUTPUT_DIR / ("每日汇总.xlsx" if furnace_list is None else f"每日汇总_{prefix}.xlsx")
+    output_path = resolve_output_dir(output_dir) / ("每日汇总.xlsx" if furnace_list is None else f"每日汇总_{prefix}.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_dataframe(writer, daily_all, f"{prefix}每日汇总")
         write_dataframe(writer, daily_line, "生产线每日汇总")
@@ -900,12 +1016,16 @@ def write_daily_summary(cycles: pd.DataFrame, furnace_list: list[str] | None = N
     return output_path, daily_all, daily_line
 
 
-def write_monthly_summary(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, pd.DataFrame, pd.DataFrame]:
+def write_monthly_summary(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, pd.DataFrame, pd.DataFrame]:
     print("\n正在生成每月汇总...")
     monthly_all, monthly_line = summary_by_month(cycles, furnace_list)
     prefix = scope_name(furnace_list)
 
-    output_path = OUTPUT_DIR / ("每月汇总.xlsx" if furnace_list is None else f"每月汇总_{prefix}.xlsx")
+    output_path = resolve_output_dir(output_dir) / ("每月汇总.xlsx" if furnace_list is None else f"每月汇总_{prefix}.xlsx")
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_dataframe(writer, monthly_all, f"{prefix}每月汇总")
         write_dataframe(writer, monthly_line, "生产线每月汇总")
@@ -1020,20 +1140,22 @@ def furnace_daily_trend_summary(trend_data: pd.DataFrame) -> pd.DataFrame:
         )
         .sort_values(["生产线", "炉号"])
     )
-    summary = add_weighted_average_yield(summary)
+    summary = merge_paired_weighted_yield(summary, trend_data, ["生产线", "炉号"])
     value_cols = ["总产量", "总反应时间", "总故障时间", "总空烧时间", "总降清时间", "平均产率"]
     summary[value_cols] = summary[value_cols].round(2)
     return summary
 
 
 def write_furnace_daily_trend_data(
-    cycles: pd.DataFrame, furnace_list: list[str] | None = None
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
 ) -> tuple[Path, pd.DataFrame]:
     print("\n正在生成单炉每日趋势数据...")
     trend_data = furnace_daily_trend_data(cycles, furnace_list)
     summary = furnace_daily_trend_summary(trend_data)
     prefix = scope_name(furnace_list)
-    output_path = OUTPUT_DIR / f"单炉每日趋势数据_{prefix}.xlsx"
+    output_path = resolve_output_dir(output_dir) / f"单炉每日趋势数据_{prefix}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_dataframe(writer, trend_data, "单炉每日明细")
@@ -1125,12 +1247,16 @@ def detect_anomalies(cycles: pd.DataFrame, sigma: float | None = None) -> pd.Dat
     return output
 
 
-def write_anomaly_report(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Path:
+def write_anomaly_report(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> Path:
     print("\n正在生成异常检测报告...")
     data = select_cycles(cycles, furnace_list)
     anomalies = detect_anomalies(data)
     prefix = scope_name(furnace_list)
-    output_path = OUTPUT_DIR / f"异常检测报告_{prefix}.xlsx"
+    output_path = resolve_output_dir(output_dir) / f"异常检测报告_{prefix}.xlsx"
 
     by_furnace = (
         anomalies.groupby(["生产线", "炉号"], as_index=False)
@@ -1185,6 +1311,13 @@ def detect_cycle_boundaries(data: pd.DataFrame, threshold: float = 20.0) -> pd.D
             cumulative = 0.0
             cycle_id += 1
     df["周期边界"] = boundaries
+    paired_mask = (
+        pd.to_numeric(df["产量"], errors="coerce").notna()
+        & pd.to_numeric(df["产量"], errors="coerce").ge(0)
+        & pd.to_numeric(df["反应时间"], errors="coerce").gt(0)
+    )
+    df["_配对产量"] = df["产量"].where(paired_mask)
+    df["_配对反应时间"] = df["反应时间"].where(paired_mask)
 
     cycle_stats = (
         df.groupby("周期编号")
@@ -1197,9 +1330,12 @@ def detect_cycle_boundaries(data: pd.DataFrame, threshold: float = 20.0) -> pd.D
             周期空烧时间=("空烧时间", "sum"),
             周期故障时间=("故障时间", "sum"),
             记录数=("周期编号", "count"),
+            _配对产量=("_配对产量", "sum"),
+            _配对反应时间=("_配对反应时间", "sum"),
         )
-        .assign(周期产率=lambda x: (x["周期产量"] / x["周期反应时间"]).round(2))
     )
+    cycle_stats["周期产率"] = weighted_yield(cycle_stats["_配对产量"], cycle_stats["_配对反应时间"]).round(2)
+    cycle_stats = cycle_stats.drop(columns=["_配对产量", "_配对反应时间"])
     return cycle_stats
 
 
@@ -1279,8 +1415,9 @@ def plot_single_furnace_daily_trend(furnace_data: pd.DataFrame, output_path: Pat
                 axes[1].axvline(end_date, color=CHART_COLORS["highlight"], alpha=0.35, linewidth=1.8, linestyle="--")
         # 左上角周期统计
         total_cycles = len(cycle_stats)
-        total_time = cycle_stats["周期反应时间"].sum()
-        avg_yield = (cycle_stats["周期产量"].sum() / total_time).round(1) if total_time > 0 else 0
+        paired = paired_production_records(data)
+        total_time = paired["反应时间"].sum()
+        avg_yield = (paired["产量"].sum() / total_time).round(1) if total_time > 0 else 0
         axes[0].text(0.02, 0.95, f"周期数: {total_cycles}  总反应时间: {total_time:.0f}h  总平均产率: {avg_yield}",
                      transform=axes[0].transAxes, fontsize=8, verticalalignment="top",
                      bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.86, edgecolor=CHART_BORDER))
@@ -1305,8 +1442,12 @@ def format_duration(seconds: float) -> str:
     return f"{math.ceil(seconds / 60)} 分钟"
 
 
-def plot_furnace_daily_trends(trend_data: pd.DataFrame, prefix: str) -> tuple[Path, list[Path]]:
-    chart_dir = OUTPUT_DIR / f"单炉每日趋势图_{prefix}"
+def plot_furnace_daily_trends(
+    trend_data: pd.DataFrame,
+    prefix: str,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, list[Path]]:
+    chart_dir = resolve_output_dir(output_dir) / f"单炉每日趋势图_{prefix}"
     chart_dir.mkdir(parents=True, exist_ok=True)
     for old_chart in chart_dir.glob("*.png"):
         old_chart.unlink()
@@ -1330,10 +1471,15 @@ def plot_furnace_daily_trends(trend_data: pd.DataFrame, prefix: str) -> tuple[Pa
     return chart_dir, chart_paths
 
 
-def run_furnace_daily_trends(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path, list[Path]]:
+def run_furnace_daily_trends(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, Path, list[Path]]:
+    target_dir = resolve_output_dir(output_dir)
     prefix = scope_name(furnace_list)
-    workbook, trend_data = write_furnace_daily_trend_data(cycles, furnace_list)
-    chart_dir, chart_paths = plot_furnace_daily_trends(trend_data, prefix)
+    workbook, trend_data = write_furnace_daily_trend_data(cycles, furnace_list, target_dir)
+    chart_dir, chart_paths = plot_furnace_daily_trends(trend_data, prefix, target_dir)
     return workbook, chart_dir, chart_paths
 
 
@@ -1346,7 +1492,8 @@ def plot_furnace_yield_comparison(cycles: pd.DataFrame, output_path: Path | None
         data = data[data["日期"] >= pd.Timestamp(start_date)]
     if end_date is not None:
         data = data[data["日期"] <= pd.Timestamp(end_date)]
-    avg = data.groupby("炉号")["产率"].mean().sort_values().dropna()
+    grouped_yield = paired_weighted_yield_by_group(data, ["炉号"], value_col="产率")
+    avg = grouped_yield.set_index("炉号")["产率"].sort_values().dropna()
     if avg.empty:
         raise ValueError("所选范围无有效产率数据")
 
@@ -1356,7 +1503,9 @@ def plot_furnace_yield_comparison(cycles: pd.DataFrame, output_path: Path | None
     _style_axis(ax, grid_axis="x")
     colors = [CHART_COLORS["low"] if v < avg.median() else CHART_COLORS["ok"] for v in avg.values]
     ax.barh(avg.index, avg.values, color=colors, alpha=0.88)
-    ax.axvline(avg.mean(), color=CHART_COLORS["reaction"], linestyle="--", linewidth=1.5, label=f"总平均 {avg.mean():.1f}")
+    paired = paired_production_records(data)
+    total_average = paired["产量"].sum() / paired["反应时间"].sum()
+    ax.axvline(total_average, color=CHART_COLORS["reaction"], linestyle="--", linewidth=1.5, label=f"总加权平均 {total_average:.1f}")
     ax.set_xlabel("平均产率 (kg/h)")
     ax.set_title(f"炉号平均产率对比（{len(avg)} 个炉子）", fontsize=14, fontweight="bold")
     _style_legend(ax.legend())
@@ -1369,7 +1518,8 @@ def plot_daily_furnace_yield_comparison(cycles: pd.DataFrame, output_path: Path 
                                          furnace_list: list[str] | None = None) -> Path | io.BytesIO:
     """Line chart: each furnace's daily yield rate over time for comparison."""
     data = select_cycles(cycles, furnace_list)
-    daily = data.pivot_table(index="日期", columns="炉号", values="产率", aggfunc="mean")
+    daily_values = paired_weighted_yield_by_group(data, ["日期", "炉号"], value_col="产率")
+    daily = daily_values.pivot(index="日期", columns="炉号", values="产率")
     if daily.empty:
         raise ValueError("无有效产率数据")
 
@@ -1400,7 +1550,11 @@ def plot_yield_heatmap(cycles: pd.DataFrame, output_path: Path | None = None,
                         value_col: str = "产率") -> Path | io.BytesIO:
     """产率热力图：X=日期, Y=炉号, 颜色=产率，替代拥挤折线"""
     data = select_cycles(cycles, furnace_list)
-    pivot = data.pivot_table(index="炉号", columns="日期", values=value_col, aggfunc="mean")
+    if value_col == "产率":
+        heatmap_values = paired_weighted_yield_by_group(data, ["炉号", "日期"], value_col="产率")
+        pivot = heatmap_values.pivot(index="炉号", columns="日期", values="产率")
+    else:
+        pivot = data.pivot_table(index="炉号", columns="日期", values=value_col, aggfunc="mean")
     pivot = pivot.sort_index()
 
     fig_h = max(7, min(28, 0.22 * len(pivot.index) + 3))
@@ -1542,7 +1696,8 @@ def plot_3d_yield_comparison(cycles: pd.DataFrame, output_path: Path | None = No
         raise ValueError("需要至少2个日期和2个炉子来生成三维图")
 
     date_map = {d: i for i, d in enumerate(dates)}
-    daily = data.pivot_table(index="日期", columns="炉号", values="产率", aggfunc="mean").reindex(dates)[furnaces]
+    daily_values = paired_weighted_yield_by_group(data, ["日期", "炉号"], value_col="产率")
+    daily = daily_values.pivot(index="日期", columns="炉号", values="产率").reindex(dates)[furnaces]
 
     fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor(CHART_SURFACE)
@@ -1695,12 +1850,16 @@ def plot_fault_heatmap(cycles: pd.DataFrame, output_path: Path | None = None, fu
     return result
 
 
-def write_fault_analysis_report(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Path:
+def write_fault_analysis_report(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> Path:
     print("\n正在生成故障分析报表...")
     prefix = scope_name(furnace_list)
     ranking = fault_ranking(cycles, furnace_list)
     weekday = fault_weekday_distribution(cycles, furnace_list)
-    output_path = OUTPUT_DIR / f"故障分析_{prefix}.xlsx"
+    output_path = resolve_output_dir(output_dir) / f"故障分析_{prefix}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_dataframe(writer, ranking, "故障炉号排名")
@@ -1711,11 +1870,16 @@ def write_fault_analysis_report(cycles: pd.DataFrame, furnace_list: list[str] | 
     return output_path
 
 
-def run_fault_analysis(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
+def run_fault_analysis(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, Path]:
     print("\n正在生成故障分析...")
+    target_dir = resolve_output_dir(output_dir)
     prefix = scope_name(furnace_list)
-    output_path = write_fault_analysis_report(cycles, furnace_list)
-    heatmap_path = plot_fault_heatmap(cycles, OUTPUT_DIR / f"故障热力图_{prefix}.png", furnace_list)
+    output_path = write_fault_analysis_report(cycles, furnace_list, target_dir)
+    heatmap_path = plot_fault_heatmap(cycles, target_dir / f"故障热力图_{prefix}.png", furnace_list)
     return output_path, heatmap_path
 
 
@@ -1813,12 +1977,14 @@ def detect_fault_warnings(cycles: pd.DataFrame, furnace_list: list[str] | None =
 
 
 def write_fault_warning_report(
-    cycles: pd.DataFrame, furnace_list: list[str] | None = None
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
 ) -> tuple[Path, pd.DataFrame, pd.DataFrame]:
     print("\n正在生成故障预警...")
     prefix = scope_name(furnace_list)
     warnings, summary = detect_fault_warnings(cycles, furnace_list)
-    output_path = OUTPUT_DIR / f"故障预警_{prefix}.xlsx"
+    output_path = resolve_output_dir(output_dir) / f"故障预警_{prefix}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_dataframe(writer, warnings, "故障预警明细")
@@ -1830,38 +1996,59 @@ def write_fault_warning_report(
     return output_path, warnings, summary
 
 
-def run_fault_warning(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> Path:
-    output_path, _, _ = write_fault_warning_report(cycles, furnace_list)
+def run_fault_warning(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> Path:
+    output_path, _, _ = write_fault_warning_report(cycles, furnace_list, output_dir)
     return output_path
 
 
-def run_daily(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
-    workbook, daily_all, _ = write_daily_summary(cycles, furnace_list)
+def run_daily(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, Path]:
+    target_dir = resolve_output_dir(output_dir)
+    workbook, daily_all, _ = write_daily_summary(cycles, furnace_list, target_dir)
     prefix = scope_name(furnace_list)
     chart_name = "每日趋势图.png" if furnace_list is None else f"每日趋势图_{prefix}.png"
-    chart = plot_summary_trend(daily_all, "日期", f"{prefix}每日生产趋势", OUTPUT_DIR / chart_name)
+    chart = plot_summary_trend(daily_all, "日期", f"{prefix}每日生产趋势", target_dir / chart_name)
     return workbook, chart
 
 
-def run_monthly(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> tuple[Path, Path]:
-    workbook, monthly_all, _ = write_monthly_summary(cycles, furnace_list)
+def run_monthly(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> tuple[Path, Path]:
+    target_dir = resolve_output_dir(output_dir)
+    workbook, monthly_all, _ = write_monthly_summary(cycles, furnace_list, target_dir)
     prefix = scope_name(furnace_list)
     chart_name = "每月趋势图.png" if furnace_list is None else f"每月趋势图_{prefix}.png"
-    chart = plot_summary_trend(monthly_all, "年月", f"{prefix}每月生产趋势", OUTPUT_DIR / chart_name)
+    chart = plot_summary_trend(monthly_all, "年月", f"{prefix}每月生产趋势", target_dir / chart_name)
     return workbook, chart
 
 
-def run_all(cycles: pd.DataFrame, furnace_list: list[str] | None = None) -> AnalysisOutputs:
+def run_all(
+    cycles: pd.DataFrame,
+    furnace_list: list[str] | None = None,
+    output_dir: Path | str | None = None,
+) -> AnalysisOutputs:
     print("\n>>> 开始运行全部分析")
     if furnace_list is None:
         furnace_count = cycles["炉号"].nunique()
         estimated = format_duration(furnace_count * 0.8)
         print(f"  --all 将为全区 {furnace_count} 个炉子生成单炉每日趋势图，预计额外耗时约 {estimated}。")
-    furnace_workbook, furnace_chart = run_furnace_stats(cycles, furnace_list=furnace_list)
-    daily_workbook, daily_chart = run_daily(cycles, furnace_list=furnace_list)
-    monthly_workbook, monthly_chart = run_monthly(cycles, furnace_list=furnace_list)
-    furnace_daily_workbook, furnace_daily_chart_dir, _ = run_furnace_daily_trends(cycles, furnace_list=furnace_list)
-    anomaly_workbook = write_anomaly_report(cycles, furnace_list=furnace_list)
+    target_dir = resolve_output_dir(output_dir)
+    furnace_workbook, furnace_chart = run_furnace_stats(cycles, furnace_list=furnace_list, output_dir=target_dir)
+    daily_workbook, daily_chart = run_daily(cycles, furnace_list=furnace_list, output_dir=target_dir)
+    monthly_workbook, monthly_chart = run_monthly(cycles, furnace_list=furnace_list, output_dir=target_dir)
+    furnace_daily_workbook, furnace_daily_chart_dir, _ = run_furnace_daily_trends(
+        cycles, furnace_list=furnace_list, output_dir=target_dir
+    )
+    anomaly_workbook = write_anomaly_report(cycles, furnace_list=furnace_list, output_dir=target_dir)
     print("\n全部分析完成")
     return AnalysisOutputs(
         furnace_workbook=furnace_workbook,

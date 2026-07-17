@@ -105,6 +105,14 @@ def test_scope_name_and_production_line_are_unambiguous() -> None:
     assert analysis.production_line_from_furnace("E01", "11A") == "L3"
 
 
+def test_vectorized_date_cleaning_rejects_out_of_range_serials() -> None:
+    values = analysis.convert_excel_dates(pd.Series([46023, "2026-01-02", 999_999_999]))
+
+    assert values.iloc[0] == pd.Timestamp("2026-01-01")
+    assert values.iloc[1] == pd.Timestamp("2026-01-02")
+    assert pd.isna(values.iloc[2])
+
+
 def test_furnace_daily_trend_summary_uses_weighted_yield() -> None:
     trend_data = pd.DataFrame(
         {
@@ -123,6 +131,31 @@ def test_furnace_daily_trend_summary_uses_weighted_yield() -> None:
     summary = analysis.furnace_daily_trend_summary(trend_data)
 
     assert summary.iloc[0]["平均产率"] == pytest.approx(10)
+
+
+def test_legacy_summaries_use_only_paired_records_for_weighted_yield() -> None:
+    cycles = pd.DataFrame(
+        {
+            "日期": pd.to_datetime(["2026-01-01"] * 4),
+            "年月": ["2026-01"] * 4,
+            "月份": [1] * 4,
+            "生产线": ["L3"] * 4,
+            "炉号": ["E01"] * 4,
+            "产量": [100.0, 900.0, None, 50.0],
+            "反应时间": [10.0, None, 90.0, 0.0],
+            "故障时间": [0.0] * 4,
+            "空烧时间": [0.0] * 4,
+            "降清时间": [0.0] * 4,
+            "周期序号": [1, 2, 3, 4],
+        }
+    )
+
+    daily, _ = analysis.summary_by_day(cycles)
+    furnace_month = analysis.monthly_furnace_average(cycles)
+
+    assert daily.iloc[0]["总产量"] == pytest.approx(1050)
+    assert daily.iloc[0]["平均产率"] == pytest.approx(10)
+    assert furnace_month.iloc[0]["平均产率"] == pytest.approx(10)
 
 
 def test_anomaly_detection_and_fault_ranking() -> None:

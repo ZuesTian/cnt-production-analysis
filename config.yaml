@@ -14,6 +14,9 @@ production_lines:
   "11A":
     patterns: ["11A"]
 
+# 仅应用明确确认的别名；近似姓名只会进入质量提示，不会自动合并。
+team_aliases: {}
+
 ranking:
   top_percent: 0.2
 
