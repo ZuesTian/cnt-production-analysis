@@ -1,23 +1,44 @@
 # 碳纳米管生产数据分析系统
 
-碳纳米管（CNT）生产线数据综合分析工具，支持 **L3** 和 **11A** 产线的炉子级统计、每日/月汇总、周期分析、热力图、异常检测和产率对比。
+碳纳米管（CNT）生产线数据综合分析工具，包含厂内离线 Web 2.0 工作台、桌面 GUI 和 CLI。Web 端支持不可变数据版本、质量门禁、班次/炉日双粒度、交互图表、后台报表及发布回滚。
+
+**项目展示页：** https://zuestian.github.io/cnt-production-analysis/  
+> GitHub Pages 仅为不含生产数据的静态展示。完整分析、导入、发布与报表功能需要本地 FastAPI/SQLite 服务。
 
 ## 快速开始
 
-### 方式一：打包版（推荐，无需 Python）
+### 方式一：Web 2.0 工作台（厂内局域网推荐）
+
+```bash
+pip install -r web_app/requirements_web.txt
+python web_app/run_server.py
+```
+
+浏览器访问 `http://服务器地址:8000`。启动时会自动执行 Alembic 数据库升级；前端生产构建已经包含在 `web_app/frontend/dist`，运行服务器不需要 Node.js、CDN 或外网。数据默认写入 `web_app/data`，也可通过 `CNT_DATA_DIR` 指定持久化目录。
+
+重新开发前端时：
+
+```bash
+cd web_app/frontend
+npm install
+npm run generate:types   # 本地 API 在 8765 端口时生成 OpenAPI 类型
+npm run build
+```
+
+### 方式二：打包版（无需 Python）
 
 1. 下载 `dist/碳纳米管生产数据分析.exe`
 2. 将生产数据 `.xlsx` 文件放在 exe 同目录下（自动识别文件名含"生产数据"的文件）
 3. 双击 exe 启动 GUI
 
-### 方式二：源码运行
+### 方式三：桌面源码运行
 
 ```bash
 pip install -r requirements.txt
 python gui_app.py
 ```
 
-### 方式三：命令行
+### 方式四：命令行
 
 ```bash
 python analysis.py --all                                    # 全部分析
@@ -63,7 +84,7 @@ python analysis.py --list-furnaces                          # 列出所有炉号
 
 ### 异常检测
 
-基于 3σ 原则 + 最低产率阈值（可配置）的双阈值机制，自动标记异常低产周期，输出偏差倍数。
+基于炉号内 2σ + 最低产率阈值（可配置）的双规则机制，自动标记异常低产班次。该功能明确属于规则异常，不是预测模型。
 
 ## GUI 界面
 
@@ -108,6 +129,9 @@ production_lines:
   L3: {patterns: ["E","F","G","H","B"]}
   "11A": {patterns: ["11A"]}
 
+team_aliases:
+  "白班 张三": "白班张三"  # 仅做明确别名映射，不会自动模糊合并姓名
+
 ranking:
   top_percent: 0.2
 
@@ -135,7 +159,7 @@ alert_thresholds:
 | 产量 | 产量（kg） | 830 |
 | 小时产能 | 产率（kg/h） | 89.2 |
 
-> 停机清理空烧同时作为空烧时间和降清时间统计。源表拆分字段后修改 config.yaml 即可。
+> `停机清理空烧` 在内部只计入一项“清理/空烧时长”。旧 Excel 模板仍保留“降清时间”兼容列，但填 0，避免停机时长重复相加。
 
 ## 项目结构
 
@@ -154,9 +178,16 @@ alert_thresholds:
 │   ├── utility.py           # 界面相关工具函数
 │   └── platform.py          # 操作系统级兼容处理
 ├── config.yaml              # 外部配置文件
+├── web_app/                 # FastAPI + SQLite WAL + Vue 3 Web 工作台
+│   ├── main.py              # 同源 API 与 SPA 托管
+│   ├── models.py            # 数据版本、班次、作业、审计模型
+│   ├── alembic/             # 数据库迁移
+│   ├── frontend/            # Vue/TypeScript 源码与离线 dist
+│   └── run_server.py        # 生产启动入口
 ├── requirements.txt         # Python 依赖
 ├── tests/
-│   └── test_analysis.py     # 核心功能单元测试
+│   ├── test_analysis.py     # 核心功能单元测试
+│   └── test_web_v2.py       # API、隔离、安全与发布回滚测试
 ├── dist/
 │   └── 碳纳米管生产数据分析.exe   # 单文件打包（独立版）
 └── README.md
@@ -174,6 +205,9 @@ alert_thresholds:
 | PyYAML | 配置文件解析 |
 | Pillow | 图片加载与自适应缩放 |
 | PyInstaller + UPX | 单文件打包 |
+| FastAPI / SQLAlchemy / SQLite WAL | Web API、版本持久化与并发读写 |
+| Vue 3 / TypeScript / Vite | 响应式离线 SPA |
+| Element Plus / ECharts 6 | 人体工学组件与无障碍交互图表 |
 
 ## License
 

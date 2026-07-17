@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="碳纳米管生产数据分析系统：离线 Web 工作台、不可变数据版本、质量门禁和班次/炉日双粒度分析。">
+  <meta name="theme-color" content="#102b2b">
+  <title>碳纳米管生产数据分析系统</title>
+  <style>
+    :root { --ink:#102b2b; --muted:#607171; --paper:#f5f3ed; --card:#fffdf8; --teal:#167875; --mint:#76a9a2; --amber:#bd7625; --red:#b8433e; --line:#d8ded9; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin:0; color:var(--ink); background:var(--paper); font-family:Inter,"Segoe UI","Microsoft YaHei",system-ui,sans-serif; line-height:1.6; }
+    a { color:inherit; }
+    .shell { width:min(1180px,calc(100% - 40px)); margin:auto; }
+    nav { display:flex; align-items:center; justify-content:space-between; padding:24px 0; gap:20px; }
+    .brand { display:flex; align-items:center; gap:12px; font-weight:800; letter-spacing:.02em; }
+    .brand-mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--teal),var(--amber)); box-shadow:0 8px 24px #16787533; }
+    .nav-links { display:flex; align-items:center; gap:24px; font-size:14px; color:var(--muted); }
+    .button { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; padding:0 20px; border-radius:12px; text-decoration:none; font-weight:700; border:1px solid var(--ink); transition:.2s ease; }
+    .button:hover { transform:translateY(-2px); box-shadow:0 10px 24px #102b2b1c; }
+    .button.primary { color:white; background:var(--ink); }
+    .button.secondary { background:transparent; }
+    .hero { padding:72px 0 56px; display:grid; grid-template-columns:1.02fr .98fr; align-items:center; gap:64px; }
+    .eyebrow { margin:0 0 14px; color:var(--teal); font-size:13px; font-weight:800; letter-spacing:.18em; text-transform:uppercase; }
+    h1 { margin:0; max-width:720px; font-family:Georgia,"Noto Serif SC",serif; font-size:clamp(44px,6vw,76px); line-height:1.05; letter-spacing:-.04em; }
+    .lede { max-width:660px; margin:26px 0; color:var(--muted); font-size:18px; }
+    .actions { display:flex; flex-wrap:wrap; gap:12px; }
+    .notice { margin-top:22px; padding-left:14px; border-left:3px solid var(--amber); color:var(--muted); font-size:14px; }
+    .workbench { padding:18px; border:1px solid #cfd8d2; border-radius:26px; background:#e9ece7; box-shadow:0 30px 80px #102b2b24; transform:rotate(1deg); }
+    .browser { overflow:hidden; border-radius:16px; background:#f9faf7; border:1px solid #d9ded8; }
+    .browser-bar { display:flex; gap:7px; align-items:center; height:38px; padding:0 14px; background:#fff; border-bottom:1px solid #e2e5df; }
+    .dot { width:9px; height:9px; border-radius:50%; background:#c6cdc8; }.dot:nth-child(1){background:#d47067}.dot:nth-child(2){background:#d8aa55}.dot:nth-child(3){background:#69aa78}
+    .dash { display:grid; grid-template-columns:66px 1fr; min-height:410px; }
+    .rail { background:var(--ink); padding:18px 14px; display:flex; flex-direction:column; gap:17px; }
+    .rail i { height:12px; border-radius:4px; background:#ffffff30; }.rail i:first-child{height:28px;background:linear-gradient(135deg,var(--mint),var(--amber))}.rail i.active{background:#fff}
+    .canvas { padding:22px; }
+    .canvas-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+    .canvas-head div:first-child { width:42%; height:15px; border-radius:4px; background:var(--ink); }.canvas-head div:last-child { width:25%; height:10px; border-radius:4px; background:#cdd5cf; }
+    .kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+    .kpi { padding:14px; border:1px solid #e0e4de; border-radius:11px; background:white; }.kpi span{display:block;width:56%;height:7px;background:#dbe1dc;border-radius:4px}.kpi b{display:block;margin-top:11px;font-size:22px}.kpi small{color:var(--teal)}
+    .chart-card { margin-top:12px; padding:16px; border:1px solid #e0e4de; border-radius:11px; background:white; }
+    .chart-title { width:34%; height:9px; background:#cdd5cf; border-radius:4px; margin-bottom:18px; }
+    .chart { position:relative; height:154px; border-left:1px solid #d8ded9; border-bottom:1px solid #d8ded9; background:repeating-linear-gradient(to bottom,transparent 0,transparent 37px,#edf0eb 38px); }
+    .bars { position:absolute; inset:12px 8px 0 12px; display:flex; align-items:end; gap:7px; }.bars i{flex:1;border-radius:3px 3px 0 0;background:linear-gradient(to top,var(--teal),var(--mint))}.bars i:nth-child(2n){background:linear-gradient(to top,#985d24,var(--amber))}
+    .line-chart { position:absolute; inset:18px 8px 20px 8px; width:calc(100% - 16px); height:calc(100% - 38px); }
+    .trust { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; margin-top:12px; overflow:hidden; border-radius:9px; background:#dce2dd; }.trust div{padding:10px;background:#f7f8f5}.trust span{display:block;height:6px;background:#cbd3cc;border-radius:3px}.trust b{display:block;margin-top:8px;font-size:12px}
+    section { padding:88px 0; }
+    .section-head { display:grid; grid-template-columns:1fr 1fr; gap:40px; align-items:end; margin-bottom:38px; }
+    h2 { margin:0; font-family:Georgia,"Noto Serif SC",serif; font-size:clamp(34px,4vw,52px); line-height:1.12; letter-spacing:-.03em; }
+    .section-head p { margin:0; color:var(--muted); }
+    .features { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; }
+    .feature { min-height:240px; padding:28px; border:1px solid var(--line); border-radius:18px; background:var(--card); }
+    .feature-number { color:var(--amber); font-family:Georgia,serif; font-size:15px; }
+    .feature h3 { margin:42px 0 10px; font-size:21px; }.feature p{margin:0;color:var(--muted);font-size:15px}
+    .architecture { background:var(--ink); color:white; }
+    .architecture .section-head p { color:#b6c5c3; }
+    .flow { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; align-items:stretch; }
+    .flow article { position:relative; padding:23px 18px; border:1px solid #ffffff22; border-radius:15px; background:#ffffff0b; }
+    .flow article:not(:last-child)::after { content:"→"; position:absolute; right:-12px; top:50%; z-index:2; color:var(--amber); font-weight:900; }
+    .flow strong { display:block; color:#fff; }.flow span{display:block;margin-top:8px;color:#a9bdb9;font-size:13px}
+    .local { display:grid; grid-template-columns:1fr 1fr; gap:28px; align-items:start; }
+    pre { margin:0; overflow:auto; padding:26px; border-radius:18px; color:#d9f0ec; background:#0a2020; box-shadow:0 24px 60px #102b2b20; font:14px/1.8 "Cascadia Code",Consolas,monospace; }
+    .local-copy p { color:var(--muted); }.tags{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.tag{padding:7px 11px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:13px;font-weight:700}
+    footer { padding:34px 0 48px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; }
+    footer .shell { display:flex; justify-content:space-between; gap:20px; }
+    @media (max-width:900px){.hero,.section-head,.local{grid-template-columns:1fr}.hero{padding-top:40px}.workbench{transform:none}.features{grid-template-columns:1fr 1fr}.flow{grid-template-columns:1fr 1fr}.flow article::after{display:none}.nav-links a:not(.button){display:none}}
+    @media (max-width:600px){.shell{width:min(100% - 24px,1180px)}.hero{gap:38px}h1{font-size:44px}.features,.flow{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}.kpi:last-child{display:none}.dash{grid-template-columns:45px 1fr}.canvas{padding:14px}.trust{grid-template-columns:1fr 1fr}section{padding:64px 0}footer .shell{display:block}}
+  </style>
+</head>
+<body>
+  <header class="shell">
+    <nav aria-label="主导航">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>CNT Production Workbench</span></div>
+      <div class="nav-links"><a href="#features">能力</a><a href="#architecture">架构</a><a href="#run">运行</a><a class="button primary" href="https://github.com/ZuesTian/cnt-production-analysis">查看源码</a></div>
+    </nav>
+  </header>
+  <main>
+    <div class="shell hero">
+      <div>
+        <p class="eyebrow">Offline-first production analytics</p>
+        <h1>让生产数据<br>可核验、可追溯、可行动</h1>
+        <p class="lede">面向碳纳米管 L3 与 11A 产线的厂内离线分析工作台，覆盖数据质量门禁、不可变版本、班次与炉日双粒度、异常诊断和报表闭环。</p>
+        <div class="actions"><a class="button primary" href="https://github.com/ZuesTian/cnt-production-analysis#快速开始">本地部署</a><a class="button secondary" href="#features">了解能力</a></div>
+        <p class="notice">此 GitHub Pages 页面不包含真实生产数据。完整工作台需要在厂内环境运行 FastAPI 与 SQLite 后端。</p>
+      </div>
+      <div class="workbench" aria-label="工作台界面示意图">
+        <div class="browser"><div class="browser-bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div><div class="dash"><aside class="rail"><i></i><i class="active"></i><i></i><i></i><i></i></aside><div class="canvas"><div class="canvas-head"><div></div><div></div></div><div class="kpis"><div class="kpi"><span></span><b>24.8 t</b><small>总产量</small></div><div class="kpi"><span></span><b>11.6</b><small>kg/h</small></div><div class="kpi"><span></span><b>96.4%</b><small>配对完整率</small></div></div><div class="chart-card"><div class="chart-title"></div><div class="chart"><div class="bars"><i style="height:42%"></i><i style="height:61%"></i><i style="height:54%"></i><i style="height:79%"></i><i style="height:70%"></i><i style="height:91%"></i><i style="height:83%"></i><i style="height:72%"></i></div><svg class="line-chart" viewBox="0 0 400 120" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="#b8433e" stroke-width="3" points="0,82 55,70 110,77 165,48 220,58 275,29 330,39 400,31"/></svg></div></div><div class="trust"><div><span></span><b>完整日确认</b></div><div><span></span><b>高风险 2 项</b></div><div><span></span><b>炉号 18</b></div><div><span></span><b>版本已发布</b></div></div></div></div></div>
+      </div>
+    </div>
+
+    <section id="features" class="shell">
+      <div class="section-head"><div><p class="eyebrow">Core capabilities</p><h2>从原始表格到可信决策</h2></div><p>系统明确区分数据清洗、规则异常、后处理汇总与完整物理或预测模型，避免把趋势展示误读为预测结论。</p></div>
+      <div class="features">
+        <article class="feature"><span class="feature-number">01</span><h3>质量门禁</h3><p>检查必需列、日期与数值范围、班组变体、重复粒度、空记录和配对完整率；高等级问题必须确认后才能发布。</p></article>
+        <article class="feature"><span class="feature-number">02</span><h3>不可变版本</h3><p>共享数据版本通过文件哈希、审计记录和单活动快照管理，支持安全发布、归档与回滚。</p></article>
+        <article class="feature"><span class="feature-number">03</span><h3>双粒度分析</h3><p>在班次和炉日粒度之间切换，以配对记录计算加权产率，避免简单平均与缺失记录造成统计偏差。</p></article>
+        <article class="feature"><span class="feature-number">04</span><h3>炉号诊断</h3><p>查看炉号排名、累计产量、加权产率、故障时间和趋势明细，支持产线、炉号和时间范围联动筛选。</p></article>
+        <article class="feature"><span class="feature-number">05</span><h3>规则异常</h3><p>采用炉号内 σ 规则和最低产率阈值识别异常低产班次，并明确说明其为历史规则标记，而非未来故障概率。</p></article>
+        <article class="feature"><span class="feature-number">06</span><h3>离线报表</h3><p>后台生成每日汇总等 Excel 报表，支持 SVG/PNG 图表导出；前端生产包无 CDN、无外网依赖。</p></article>
+      </div>
+    </section>
+
+    <section id="architecture" class="architecture">
+      <div class="shell"><div class="section-head"><div><p class="eyebrow">Architecture</p><h2>本地优先的闭环架构</h2></div><p>真实数据、数据库与报表均留在部署环境中。GitHub 只保存源码和不含生产数据的静态展示页。</p></div><div class="flow"><article><strong>Excel / CSV</strong><span>受控导入与真实格式校验</span></article><article><strong>质量预检</strong><span>覆盖率、配对和完整日确认</span></article><article><strong>SQLite WAL</strong><span>不可变版本与审计轨迹</span></article><article><strong>FastAPI</strong><span>同源 API、作业与导出服务</span></article><article><strong>Vue 3</strong><span>响应式工作台与交互图表</span></article></div></div>
+    </section>
+
+    <section id="run" class="shell local">
+      <div class="local-copy"><p class="eyebrow">Local deployment</p><h2>三条命令启动完整工作台</h2><p>生产部署建议使用独立 Python 环境，并将 <code>CNT_DATA_DIR</code> 指向持久化目录。启动过程自动执行 Alembic 数据库升级。</p><div class="tags"><span class="tag">Python 3.11+</span><span class="tag">FastAPI</span><span class="tag">SQLite WAL</span><span class="tag">Vue 3</span><span class="tag">ECharts 6</span></div><a class="button primary" href="https://github.com/ZuesTian/cnt-production-analysis">打开 GitHub 仓库</a></div>
+      <pre><code>git clone https://github.com/ZuesTian/cnt-production-analysis.git
+cd cnt-production-analysis
+pip install -r web_app/requirements_web.txt
+python web_app/run_server.py
+
+# 浏览器访问
+http://127.0.0.1:8000</code></pre>
+    </section>
+  </main>
+  <footer><div class="shell"><span>碳纳米管生产数据分析系统 · Web 2.0</span><span>静态展示页不上传、不读取生产数据</span></div></footer>
+</body>
+</html>
