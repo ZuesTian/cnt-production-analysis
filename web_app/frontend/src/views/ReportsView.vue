@@ -34,6 +34,10 @@ async function create(reportType: string) {
   } catch (caught) { ElMessage.error(caught instanceof ApiError ? caught.message : caught instanceof Error ? caught.message : '报表生成失败') }
   finally { creating.value = '' }
 }
+async function download(artifact: ExportArtifact) {
+  try { await api.downloadExport(artifact) }
+  catch (caught) { ElMessage.error(caught instanceof ApiError ? caught.message : '文件下载失败') }
+}
 function formatBytes(value: number) { return value > 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(value / 1024)} KB` }
 onMounted(() => void refresh())
 </script>
@@ -51,7 +55,7 @@ onMounted(() => void refresh())
         </section>
         <section class="exports-panel"><header><div><p class="eyebrow">DELIVERY HISTORY</p><h2>已生成文件</h2></div><el-button @click="refresh">刷新</el-button></header>
           <el-table :data="exports" empty-text="尚未生成报表">
-            <el-table-column prop="filename" label="文件" min-width="300" /><el-table-column prop="report_type" label="类型" width="160" /><el-table-column label="大小" width="110"><template #default="scope">{{ formatBytes(scope.row.size) }}</template></el-table-column><el-table-column prop="created_at" label="生成时间" width="190" /><el-table-column label="操作" width="110"><template #default="scope"><a class="table-link" :href="`/api/v1/exports/${scope.row.id}/download`">下载</a></template></el-table-column>
+            <el-table-column prop="filename" label="文件" min-width="300" /><el-table-column prop="report_type" label="类型" width="160" /><el-table-column label="大小" width="110"><template #default="scope">{{ formatBytes(scope.row.size) }}</template></el-table-column><el-table-column prop="created_at" label="生成时间" width="190" /><el-table-column label="操作" width="110"><template #default="scope"><el-button link type="primary" @click="download(scope.row)">下载</el-button></template></el-table-column>
           </el-table>
         </section>
       </template>

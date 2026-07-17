@@ -1,8 +1,12 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, createWebHistory } from 'vue-router'
 import AppShell from '@/layouts/AppShell.vue'
 
+const history = import.meta.env.VITE_ROUTER_MODE === 'hash'
+  ? createWebHashHistory(import.meta.env.BASE_URL)
+  : createWebHistory(import.meta.env.BASE_URL)
+
 const router = createRouter({
-  history: createWebHistory(),
+  history,
   scrollBehavior: () => ({ top: 0 }),
   routes: [
     {

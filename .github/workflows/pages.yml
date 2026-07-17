@@ -4,9 +4,8 @@ on:
   push:
     branches:
       - master
-      - codex/web-v2-pages
     paths:
-      - docs/**
+      - web_app/frontend/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -28,12 +27,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web_app/frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web_app/frontend
+        run: npm ci
+      - name: Build production frontend
+        working-directory: web_app/frontend
+        env:
+          VITE_API_BASE_URL: https://cnt-analysis.47.236.76.214.nip.io
+          VITE_BASE_PATH: /cnt-production-analysis/
+          VITE_REQUIRE_API_KEY: 'true'
+          VITE_ROUTER_MODE: hash
+        run: npm run build
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload static site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: web_app/frontend/dist
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

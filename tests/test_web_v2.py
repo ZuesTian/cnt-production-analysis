@@ -45,6 +45,44 @@ def test_similar_operator_names_are_only_reported_as_review_hints() -> None:
     assert ["王刚", "王强"] not in pairs
 
 
+def test_remote_api_requires_bearer_token_and_supports_cors(tmp_path: Path, monkeypatch) -> None:
+    origin = "https://zuestian.github.io"
+    monkeypatch.setenv("CNT_API_TOKEN", "deployment-secret")
+    monkeypatch.setenv("CNT_ALLOWED_ORIGINS", origin)
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+
+    with TestClient(app) as client:
+        health = client.get("/api/v1/health")
+        assert health.status_code == 200
+
+        unauthorized = client.get("/api/v1/datasets", headers={"Origin": origin})
+        assert unauthorized.status_code == 401
+        assert unauthorized.json()["code"] == "AUTH_REQUIRED"
+        assert unauthorized.headers["access-control-allow-origin"] == origin
+
+        preflight = client.options(
+            "/api/v1/datasets",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,x-cnt-workspace",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == origin
+
+        authorized = client.get(
+            "/api/v1/auth/check",
+            headers={
+                "Origin": origin,
+                "Authorization": "Bearer deployment-secret",
+                "X-CNT-Workspace": "browserworkspace123456789012",
+            },
+        )
+        assert authorized.status_code == 200
+        assert authorized.json() == {"status": "ok"}
+
+
 def source_rows(output_offset: float = 0) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     start = date(2026, 1, 1)

@@ -1,0 +1,24 @@
+[Unit]
+Description=CNT production analysis API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cntprod
+Group=cntprod
+WorkingDirectory=/opt/cnt-production/current
+EnvironmentFile=/etc/cnt-production.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/cnt-production/.venv/bin/python -m uvicorn main:app --app-dir /opt/cnt-production/current/web_app --host 127.0.0.1 --port 8768 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cnt-production/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, queryString } from './client'
+import { api, clearAccessToken, queryString, setAccessToken } from './client'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  clearAccessToken()
+  window.localStorage.clear()
+  vi.unstubAllGlobals()
+})
 
 describe('API client', () => {
   it('serializes filter arrays into stable shareable query parameters', () => {
@@ -15,5 +19,20 @@ describe('API client', () => {
     vi.stubGlobal('fetch', fetchMock)
     await expect(api.datasets()).rejects.toMatchObject({ code: 'NO_DATA', message: '暂无数据' })
     await expect(api.datasets()).resolves.toEqual([])
+  })
+
+  it('sends the runtime access token and stable workspace header', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    setAccessToken('test-secret')
+
+    await api.datasets()
+
+    const options = fetchMock.mock.calls[0][1] as RequestInit
+    const headers = new Headers(options.headers)
+    expect(headers.get('Authorization')).toBe('Bearer test-secret')
+    expect(headers.get('X-CNT-Workspace')).toMatch(/^[a-z0-9]{32}$/)
   })
 })

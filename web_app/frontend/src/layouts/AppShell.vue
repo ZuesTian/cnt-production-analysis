@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useContextStore } from '@/stores/context'
 import { useJobsStore } from '@/stores/jobs'
+import { ApiError } from '@/api/client'
 import AppSidebar from '@/components/AppSidebar.vue'
 import TopContextBar from '@/components/TopContextBar.vue'
 
@@ -16,9 +17,13 @@ const { activeJobs } = storeToRefs(jobs)
 function contextChanged() { context.syncUrl(router) }
 
 onMounted(async () => {
-  await context.initialize(route.query)
-  context.syncUrl(router)
-  await jobs.refresh()
+  try {
+    await context.initialize(route.query)
+    context.syncUrl(router)
+    await jobs.refresh()
+  } catch (caught) {
+    if (!(caught instanceof ApiError && caught.status === 401)) throw caught
+  }
 })
 
 watch(() => route.query.dataset, (value) => {

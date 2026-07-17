@@ -130,6 +130,11 @@ def health(request: Request) -> dict[str, str]:
     return {"status": "ok", "version": request.app.version}
 
 
+@router.get("/auth/check")
+def auth_check() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @router.post(
     "/datasets/imports",
     response_model=ImportAccepted,
