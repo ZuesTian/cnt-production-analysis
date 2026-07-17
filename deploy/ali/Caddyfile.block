@@ -1,0 +1,18 @@
+cnt-analysis.47.236.76.214.nip.io {
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+	}
+
+	@api path /api/*
+	handle @api {
+		request_body {
+			max_size 50MB
+		}
+		reverse_proxy 127.0.0.1:8768
+	}
+
+	respond "CNT production analysis API" 200
+}

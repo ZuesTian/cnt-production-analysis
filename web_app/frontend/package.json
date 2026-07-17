@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && vue-tsc -b && vite build",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true,maxRetries:5,retryDelay:200})\"",
+    "build": "npm run clean && vue-tsc -b && vite build && npm run normalize:dist",
+    "normalize:dist": "node -e \"const fs=require('node:fs');const p='dist/index.html';fs.writeFileSync(p,fs.readFileSync(p,'utf8').replace(/\\r\\n?/g,'\\n'))\"",
     "generate:types": "openapi-typescript http://127.0.0.1:8765/openapi.json -o src/types/openapi.gen.ts",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",

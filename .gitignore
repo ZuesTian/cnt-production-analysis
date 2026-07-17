@@ -6,6 +6,7 @@ __pycache__/
 # pytest
 .pytest_cache/
 .pytest-tmp/
+.deploy-secrets/
 
 # 输出缓存
 output/

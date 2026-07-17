@@ -25,6 +25,8 @@ class Settings:
     complete_day_min_coverage: float = 0.90
     yield_delta_warning: float = 5.0
     freshness_warning_days: int = 2
+    allowed_origins: tuple[str, ...] = ()
+    api_token: str | None = None
 
     def ensure_directories(self) -> None:
         for path in (self.data_dir, self.import_dir, self.export_dir):
@@ -34,12 +36,19 @@ class Settings:
 def build_settings(data_dir: str | Path | None = None) -> Settings:
     configured = data_dir or os.environ.get("CNT_DATA_DIR")
     root = Path(configured).expanduser().resolve() if configured else (WEB_APP_DIR / "data").resolve()
+    allowed_origins = tuple(
+        origin.strip().rstrip("/")
+        for origin in os.environ.get("CNT_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    )
     settings = Settings(
         data_dir=root,
         database_path=root / "cnt_analysis.db",
         import_dir=root / "imports",
         export_dir=root / "exports",
         frontend_dist=WEB_APP_DIR / "frontend" / "dist",
+        allowed_origins=allowed_origins,
+        api_token=os.environ.get("CNT_API_TOKEN") or None,
     )
     settings.ensure_directories()
     return settings

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import sys
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from threading import Lock
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 
@@ -31,6 +33,7 @@ from sqlalchemy import select
 
 
 logger = logging.getLogger(__name__)
+WORKSPACE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{24,64}$")
 
 
 CSP = (
@@ -83,12 +86,30 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
 
     @app.middleware("http")
     async def security_and_workspace(request: Request, call_next):
-        workspace_id = request.cookies.get("cnt_workspace")
+        workspace_header = request.headers.get("X-CNT-Workspace", "")
+        workspace_id = workspace_header if WORKSPACE_PATTERN.fullmatch(workspace_header) else None
+        if not workspace_id:
+            workspace_id = request.cookies.get("cnt_workspace")
         created = False
         if not workspace_id or len(workspace_id) < 24:
             workspace_id = secrets.token_urlsafe(32)
             created = True
         request.state.workspace_id = workspace_id
+
+        protected_api = request.url.path.startswith("/api/v1/") and request.url.path != "/api/v1/health"
+        if settings.api_token and protected_api and request.method != "OPTIONS":
+            scheme, _, supplied_token = request.headers.get("Authorization", "").partition(" ")
+            authenticated = scheme.lower() == "bearer" and secrets.compare_digest(
+                supplied_token,
+                settings.api_token,
+            )
+            if not authenticated:
+                return JSONResponse(
+                    status_code=401,
+                    content={"code": "AUTH_REQUIRED", "message": "需要有效的生产数据访问密钥", "details": None},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -105,6 +126,17 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
                 path="/",
             )
         return response
+
+    if settings.allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.allowed_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-CNT-Workspace"],
+            expose_headers=["Content-Disposition"],
+            max_age=3600,
+        )
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(_request: Request, exc: ServiceError):

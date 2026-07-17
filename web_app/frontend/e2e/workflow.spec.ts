@@ -44,7 +44,7 @@ test('import, preview, publish, analyze, export and rollback', async ({ page }) 
   const dailyCard = page.locator('.report-card').filter({ hasText: '每日生产汇总' })
   await dailyCard.getByRole('button', { name: '生成报表' }).click()
   await expect(page.getByText('报表已生成')).toBeVisible({ timeout: 60_000 })
-  await expect(page.locator('.exports-panel').getByRole('link', { name: '下载' }).first()).toBeVisible()
+  await expect(page.locator('.exports-panel').getByRole('button', { name: '下载' }).first()).toBeVisible()
 
   await page.goto('/data')
   const previousRow = page.getByRole('row').filter({ hasText: previous!.name }).first()
