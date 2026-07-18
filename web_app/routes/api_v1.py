@@ -11,19 +11,24 @@ from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import Settings
+from auth import AuthManager, InvalidCredentialsError, LoginRateLimitedError
 from models import AuditEvent, Dataset, ExportArtifact, Job, QualityIssue, utcnow
 from schemas_v1 import (
+    AuthCheckResponse,
+    AuthUserBody,
     DatasetSummary,
     ExportRequest,
     FilterOptionsResponse,
     ImportAccepted,
+    LoginRequest,
+    LoginResponse,
     JobQueryRequest,
     JobStatus,
     OverviewResponse,
@@ -130,8 +135,56 @@ def health(request: Request) -> dict[str, str]:
     return {"status": "ok", "version": request.app.version}
 
 
-@router.get("/auth/check")
-def auth_check() -> dict[str, str]:
+def _auth_user_body(request: Request) -> dict[str, str]:
+    user = getattr(request.state, "auth_user", None)
+    if user is not None:
+        return user.public_dict()
+    if request.app.state.settings.api_token:
+        return {"username": "api-token", "display_name": "访问密钥用户"}
+    return {"username": "local", "display_name": "本地用户"}
+
+
+@router.post("/auth/login", response_model=LoginResponse)
+def auth_login(payload: LoginRequest, request: Request, response: Response) -> dict:
+    manager: AuthManager | None = request.app.state.auth_manager
+    if manager is None:
+        raise ServiceError("AUTH_NOT_CONFIGURED", "账号登录尚未配置", 503)
+    try:
+        user = manager.authenticate(payload.username, payload.password, _client_ip(request))
+    except LoginRateLimitedError as exc:
+        raise ServiceError(
+            "LOGIN_RATE_LIMITED",
+            "登录尝试过于频繁，请稍后再试",
+            429,
+            {"retry_after_seconds": exc.retry_after_seconds},
+        ) from exc
+    except InvalidCredentialsError as exc:
+        raise ServiceError("INVALID_CREDENTIALS", "账号或密码错误", 401) from exc
+    token, expires_in = manager.issue_token(user)
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": expires_in,
+        "user": user.public_dict(),
+    }
+
+
+@router.get("/auth/me", response_model=AuthUserBody)
+def auth_me(request: Request, response: Response) -> dict[str, str]:
+    response.headers["Cache-Control"] = "no-store"
+    return _auth_user_body(request)
+
+
+@router.get("/auth/check", response_model=AuthCheckResponse)
+def auth_check(request: Request, response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "ok", "user": _auth_user_body(request)}
+
+
+@router.post("/auth/logout")
+def auth_logout(response: Response) -> dict[str, str]:
+    response.headers["Cache-Control"] = "no-store"
     return {"status": "ok"}
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import base64
 import io
+import json
 import sys
 import time
 import zipfile
@@ -22,6 +24,13 @@ sys.path.insert(0, str(WEB_APP))
 sys.path.insert(0, str(ROOT))
 
 from main import create_app
+from auth import (
+    AuthConfigurationError,
+    InvalidSessionError,
+    LoginRateLimiter,
+    hash_password,
+    verify_password,
+)
 from models import Dataset, ExportArtifact, ShiftRecord, utcnow
 from services.import_service import _similar_operator_pairs
 
@@ -36,6 +45,17 @@ SOURCE_COLUMNS = [
     "产量",
     "小时产能",
 ]
+
+
+@pytest.fixture(autouse=True)
+def isolate_runtime_auth_environment(monkeypatch):
+    for name in (
+        "CNT_API_TOKEN",
+        "CNT_AUTH_USERS_B64",
+        "CNT_AUTH_SECRET",
+        "CNT_AUTH_TOKEN_TTL_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_similar_operator_names_are_only_reported_as_review_hints() -> None:
@@ -80,7 +100,138 @@ def test_remote_api_requires_bearer_token_and_supports_cors(tmp_path: Path, monk
             },
         )
         assert authorized.status_code == 200
-        assert authorized.json() == {"status": "ok"}
+        assert authorized.json() == {
+            "status": "ok",
+            "user": {"username": "api-token", "display_name": "访问密钥用户"},
+        }
+
+
+def _auth_users_config(users: list[tuple[str, str, str]]) -> str:
+    payload = [
+        {
+            "username": username,
+            "display_name": display_name,
+            "password_hash": hash_password(password, iterations=100_000),
+        }
+        for username, display_name, password in users
+    ]
+    return base64.urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+
+def test_account_login_issues_signed_sessions_for_all_configured_users(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    users = [
+        ("owner", "负责人", "owner-password"),
+        ("operator", "操作员", "operator-password"),
+        ("shared", "共用账号", "shared-password"),
+    ]
+    monkeypatch.setenv("CNT_API_TOKEN", "legacy-token-must-not-bypass-account-login")
+    monkeypatch.setenv("CNT_AUTH_USERS_B64", _auth_users_config(users))
+    monkeypatch.setenv("CNT_AUTH_SECRET", "test-session-signing-secret-that-is-long-enough")
+    monkeypatch.setenv("CNT_AUTH_TOKEN_TTL_SECONDS", "3600")
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        unauthorized = client.get("/api/v1/datasets")
+        assert unauthorized.status_code == 401
+        assert unauthorized.json()["code"] == "AUTH_REQUIRED"
+        legacy = client.get(
+            "/api/v1/datasets",
+            headers={"Authorization": "Bearer legacy-token-must-not-bypass-account-login"},
+        )
+        assert legacy.status_code == 401
+        assert legacy.json()["code"] == "AUTH_INVALID"
+
+        wrong = client.post(
+            "/api/v1/auth/login",
+            json={"username": "owner", "password": "wrong-password"},
+        )
+        assert wrong.status_code == 401
+        assert wrong.json() == {
+            "code": "INVALID_CREDENTIALS",
+            "message": "账号或密码错误",
+            "details": None,
+        }
+
+        tokens: dict[str, str] = {}
+        for username, display_name, password in users:
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"username": username, "password": password},
+            )
+            assert login.status_code == 200, login.text
+            body = login.json()
+            assert body["token_type"] == "bearer"
+            assert body["expires_in"] == 3600
+            assert body["user"] == {"username": username, "display_name": display_name}
+            assert "password" not in json.dumps(body)
+            assert login.headers["cache-control"] == "no-store"
+            tokens[username] = body["access_token"]
+
+        headers = {"Authorization": f"Bearer {tokens['operator']}"}
+        me = client.get("/api/v1/auth/me", headers=headers)
+        assert me.status_code == 200
+        assert me.json() == {"username": "operator", "display_name": "操作员"}
+        check = client.get("/api/v1/auth/check", headers=headers)
+        assert check.json()["user"] == me.json()
+        assert client.get("/api/v1/datasets", headers=headers).status_code == 200
+        assert client.post("/api/v1/auth/logout", headers=headers).json() == {"status": "ok"}
+
+        tampered = client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {tokens['owner']}x"},
+        )
+        assert tampered.status_code == 401
+        assert tampered.json()["code"] == "AUTH_INVALID"
+
+    manager = app.state.auth_manager
+    assert manager is not None
+    owner = manager.users["owner"]
+    expired_token, _ = manager.issue_token(owner, now=1_000)
+    with pytest.raises(InvalidSessionError):
+        manager.verify_token(expired_token, now=4_600)
+
+
+def test_password_hash_and_login_failure_rate_limit(tmp_path: Path, monkeypatch) -> None:
+    encoded = hash_password("correct horse", iterations=100_000)
+    assert verify_password("correct horse", encoded)
+    assert not verify_password("wrong horse", encoded)
+
+    monkeypatch.setenv(
+        "CNT_AUTH_USERS_B64",
+        _auth_users_config([("limited", "限速测试", "correct-password")]),
+    )
+    monkeypatch.setenv("CNT_AUTH_SECRET", "another-test-session-secret-that-is-long-enough")
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+    app.state.auth_manager.login_limiter = LoginRateLimiter(attempts=2, window_seconds=600)
+
+    with TestClient(app) as client:
+        for _ in range(2):
+            response = client.post(
+                "/api/v1/auth/login",
+                json={"username": "limited", "password": "incorrect"},
+            )
+            assert response.status_code == 401
+        limited = client.post(
+            "/api/v1/auth/login",
+            json={"username": "limited", "password": "correct-password"},
+        )
+        assert limited.status_code == 429
+        assert limited.json()["code"] == "LOGIN_RATE_LIMITED"
+
+
+def test_partial_account_auth_configuration_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "CNT_AUTH_USERS_B64",
+        _auth_users_config([("member", "成员", "password")]),
+    )
+    with pytest.raises(AuthConfigurationError):
+        create_app(tmp_path / "runtime", serve_frontend=False)
 
 
 def source_rows(output_offset: float = 0) -> list[dict[str, object]]:

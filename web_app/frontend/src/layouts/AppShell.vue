@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import { useContextStore } from '@/stores/context'
 import { useJobsStore } from '@/stores/jobs'
+import { useAuthStore } from '@/stores/auth'
 import { ApiError } from '@/api/client'
 import AppSidebar from '@/components/AppSidebar.vue'
 import TopContextBar from '@/components/TopContextBar.vue'
@@ -12,6 +13,7 @@ const route = useRoute()
 const router = useRouter()
 const context = useContextStore()
 const jobs = useJobsStore()
+const auth = useAuthStore()
 const { activeJobs } = storeToRefs(jobs)
 
 function contextChanged() { context.syncUrl(router) }
@@ -51,6 +53,7 @@ watch(() => route.query.dataset, (value) => {
       <RouterLink to="/"><span aria-hidden="true">▦</span><small>总览</small></RouterLink>
       <RouterLink to="/diagnostics"><span aria-hidden="true">△</span><small>告警</small></RouterLink>
       <RouterLink to="/furnaces"><span aria-hidden="true">◎</span><small>炉号</small></RouterLink>
+      <button v-if="auth.user" type="button" aria-label="退出登录" @click="auth.logout"><span aria-hidden="true">退</span><small>退出</small></button>
     </nav>
   </div>
 </template>

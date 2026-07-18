@@ -1,9 +1,11 @@
 import type {
   ApiErrorBody,
+  AuthUser,
   DatasetSummary,
   ExportArtifact,
   FilterOptions,
   JobStatus,
+  LoginResponse,
   OverviewResponse,
   QualityReport,
   SeriesResponse,
@@ -70,7 +72,7 @@ async function fetchResponse(url: string, options?: RequestInit): Promise<Respon
     credentials: API_BASE_URL ? 'omit' : 'same-origin',
     headers: requestHeaders(options),
   })
-  if (response.status === 401 && typeof window !== 'undefined') {
+  if (response.status === 401 && url !== '/api/v1/auth/login' && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('cnt-auth-required'))
   }
   return response
@@ -97,11 +99,21 @@ export function queryString(values: Record<string, string | string[] | undefined
 }
 
 export const api = {
+  requiresLogin: import.meta.env.VITE_REQUIRE_LOGIN === 'true',
   requiresAccessKey: import.meta.env.VITE_REQUIRE_API_KEY === 'true',
   hasAccessToken: () => Boolean(getAccessToken()),
   setAccessToken,
   clearAccessToken,
   verifyAccess: () => request<{ status: string }>('/api/v1/auth/check'),
+  login: (username: string, password: string) => {
+    clearAccessToken()
+    return request<LoginResponse>('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    })
+  },
+  me: () => request<AuthUser>('/api/v1/auth/me'),
+  logout: () => request<{ status: string }>('/api/v1/auth/logout', { method: 'POST' }),
   datasets: () => request<DatasetSummary[]>('/api/v1/datasets'),
   quality: (id: string) => request<QualityReport>(`/api/v1/datasets/${id}/quality`),
   filters: (id?: string) => request<FilterOptions>(`/api/v1/filters${queryString({ dataset_id: id })}`),
