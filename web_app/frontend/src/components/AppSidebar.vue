@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
+const auth = useAuthStore()
+const { user } = storeToRefs(auth)
 const collapsed = ref(localStorage.getItem('cnt-sidebar') === 'collapsed')
 const items = [
   { to: '/', label: '生产总览', short: '总', mark: 'M4 5h16v4H4zm0 6h7v8H4zm9 0h7v8h-7z' },
@@ -36,6 +40,11 @@ function toggle() {
         <span>{{ collapsed ? item.short : item.label }}</span>
       </RouterLink>
     </nav>
+    <div v-if="user" class="sidebar-session" :title="`${user.display_name}（${user.username}）`">
+      <span class="sidebar-session__avatar">{{ user.display_name.slice(0, 1).toUpperCase() }}</span>
+      <span class="sidebar-session__identity"><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span>
+      <button type="button" aria-label="退出登录" title="退出登录" @click="auth.logout">退出</button>
+    </div>
     <div class="sidebar__foot">
       <span class="offline-dot" /><span class="sidebar__offline">厂内离线模式</span>
       <button type="button" class="collapse-button" :aria-label="collapsed ? '展开导航' : '收起导航'" @click="toggle">

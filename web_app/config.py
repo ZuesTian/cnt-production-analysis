@@ -27,6 +27,9 @@ class Settings:
     freshness_warning_days: int = 2
     allowed_origins: tuple[str, ...] = ()
     api_token: str | None = None
+    auth_users_b64: str | None = None
+    auth_secret: str | None = None
+    auth_token_ttl_seconds: int = 12 * 60 * 60
 
     def ensure_directories(self) -> None:
         for path in (self.data_dir, self.import_dir, self.export_dir):
@@ -49,6 +52,24 @@ def build_settings(data_dir: str | Path | None = None) -> Settings:
         frontend_dist=WEB_APP_DIR / "frontend" / "dist",
         allowed_origins=allowed_origins,
         api_token=os.environ.get("CNT_API_TOKEN") or None,
+        auth_users_b64=os.environ.get("CNT_AUTH_USERS_B64") or None,
+        auth_secret=os.environ.get("CNT_AUTH_SECRET") or None,
+        auth_token_ttl_seconds=_bounded_int(
+            os.environ.get("CNT_AUTH_TOKEN_TTL_SECONDS"),
+            default=12 * 60 * 60,
+            minimum=5 * 60,
+            maximum=7 * 24 * 60 * 60,
+        ),
     )
     settings.ensure_directories()
     return settings
+
+
+def _bounded_int(value: str | None, *, default: int, minimum: int, maximum: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return min(max(parsed, minimum), maximum)

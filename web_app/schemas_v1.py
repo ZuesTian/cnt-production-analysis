@@ -15,6 +15,28 @@ class ErrorBody(BaseModel):
     details: Any | None = None
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AuthUserBody(BaseModel):
+    username: str
+    display_name: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_in: int
+    user: AuthUserBody
+
+
+class AuthCheckResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    user: AuthUserBody
+
+
 class DatasetSummary(BaseModel):
     id: str
     kind: Literal["shared", "temporary"]

@@ -35,4 +35,25 @@ describe('API client', () => {
     expect(headers.get('Authorization')).toBe('Bearer test-secret')
     expect(headers.get('X-CNT-Workspace')).toMatch(/^[a-z0-9]{32}$/)
   })
+
+  it('logs in without forwarding a stale bearer token', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        access_token: 'signed-session',
+        token_type: 'bearer',
+        expires_in: 3600,
+        user: { username: 'member', display_name: '成员' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    setAccessToken('stale-token')
+
+    const session = await api.login('member', 'password')
+
+    expect(session.user.display_name).toBe('成员')
+    const options = fetchMock.mock.calls[0][1] as RequestInit
+    const headers = new Headers(options.headers)
+    expect(headers.has('Authorization')).toBe(false)
+    expect(JSON.parse(String(options.body))).toEqual({ username: 'member', password: 'password' })
+  })
 })

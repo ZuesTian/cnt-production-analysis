@@ -21,6 +21,7 @@ for item in (PROJECT_ROOT, WEB_APP_DIR):
         sys.path.insert(0, str(item))
 
 import analysis
+from auth import AuthManager, InvalidSessionError
 from config import build_settings
 from database import create_database, migrate_database
 from models import Dataset
@@ -55,6 +56,7 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
     migrate_database(settings.database_path)
     engine, session_factory = create_database(settings.database_path)
     manager = JobManager(session_factory)
+    auth_manager = AuthManager.from_settings(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -83,9 +85,11 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
     app.state.job_manager = manager
     app.state.publish_lock = Lock()
     app.state.upload_limiter = UploadRateLimiter()
+    app.state.auth_manager = auth_manager
 
     @app.middleware("http")
     async def security_and_workspace(request: Request, call_next):
+        request.state.auth_user = None
         workspace_header = request.headers.get("X-CNT-Workspace", "")
         workspace_id = workspace_header if WORKSPACE_PATTERN.fullmatch(workspace_header) else None
         if not workspace_id:
@@ -96,14 +100,30 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
             created = True
         request.state.workspace_id = workspace_id
 
-        protected_api = request.url.path.startswith("/api/v1/") and request.url.path != "/api/v1/health"
-        if settings.api_token and protected_api and request.method != "OPTIONS":
+        public_api_paths = {"/api/v1/health", "/api/v1/auth/login"}
+        protected_api = request.url.path.startswith("/api/v1/") and request.url.path not in public_api_paths
+        if auth_manager and protected_api and request.method != "OPTIONS":
             scheme, _, supplied_token = request.headers.get("Authorization", "").partition(" ")
-            authenticated = scheme.lower() == "bearer" and secrets.compare_digest(
-                supplied_token,
-                settings.api_token,
-            )
-            if not authenticated:
+            if scheme.lower() != "bearer" or not supplied_token:
+                return JSONResponse(
+                    status_code=401,
+                    content={"code": "AUTH_REQUIRED", "message": "请先登录后再访问生产数据", "details": None},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            try:
+                request.state.auth_user = auth_manager.verify_token(supplied_token)
+            except InvalidSessionError:
+                return JSONResponse(
+                    status_code=401,
+                    content={"code": "AUTH_INVALID", "message": "登录已失效，请重新登录", "details": None},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        elif settings.api_token and protected_api and request.method != "OPTIONS":
+            scheme, _, supplied_token = request.headers.get("Authorization", "").partition(" ")
+            if not (
+                scheme.lower() == "bearer"
+                and secrets.compare_digest(supplied_token, settings.api_token)
+            ):
                 return JSONResponse(
                     status_code=401,
                     content={"code": "AUTH_REQUIRED", "message": "需要有效的生产数据访问密钥", "details": None},

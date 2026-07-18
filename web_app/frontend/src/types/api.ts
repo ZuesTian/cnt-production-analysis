@@ -97,3 +97,15 @@ export interface ExportArtifact {
 }
 
 export interface ApiErrorBody { code: string; message: string; details?: unknown }
+
+export interface AuthUser {
+  username: string
+  display_name: string
+}
+
+export interface LoginResponse {
+  access_token: string
+  token_type: 'bearer'
+  expires_in: number
+  user: AuthUser
+}
