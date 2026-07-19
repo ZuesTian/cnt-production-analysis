@@ -321,7 +321,12 @@ def convert_excel_date(value: object) -> pd.Timestamp:
 
 
 def convert_excel_dates(values: pd.Series) -> pd.Series:
-    """Vectorized Excel-serial and text date conversion."""
+    """Vectorized Excel-serial and text date conversion.
+
+    Excel's clipboard commonly renders dates as ``2月1日``.  The copied text
+    loses the source year, so use the current calendar year only for that
+    otherwise unambiguous month/day form.
+    """
     numeric = pd.to_numeric(values, errors="coerce")
     result = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
     numeric_mask = numeric.notna()
@@ -336,6 +341,25 @@ def convert_excel_dates(values: pd.Series) -> pd.Series:
         except TypeError:
             parsed = pd.to_datetime(values.loc[~numeric_mask], errors="coerce")
         result.loc[~numeric_mask] = parsed
+
+    # A direct copy from Excel/WPS may turn a date cell into Chinese display
+    # text such as "2月1日". Pandas does not consistently parse this on Linux.
+    unresolved = result.isna()
+    if unresolved.any():
+        chinese = values.loc[unresolved].astype("string").str.extract(
+            r"^\s*(?:(?P<year>\d{4})\s*年\s*)?(?P<month>\d{1,2})\s*月\s*(?P<day>\d{1,2})\s*(?:日|号)?\s*$"
+        )
+        recognized = chinese["month"].notna() & chinese["day"].notna()
+        if recognized.any():
+            years = chinese.loc[recognized, "year"].fillna(str(datetime.now().year))
+            normalized = (
+                years.astype(str)
+                + "-"
+                + chinese.loc[recognized, "month"]
+                + "-"
+                + chinese.loc[recognized, "day"]
+            )
+            result.loc[normalized.index] = pd.to_datetime(normalized, errors="coerce")
     return result.dt.normalize()
 
 
