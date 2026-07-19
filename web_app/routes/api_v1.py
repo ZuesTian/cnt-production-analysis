@@ -388,6 +388,10 @@ def create_paste_import(
     content = payload.content.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
     if not content.strip():
         raise ServiceError("EMPTY_PASTE", "粘贴内容为空", 422)
+    # Excel/WPS often copies every row out to the worksheet's used-column
+    # boundary, leaving hundreds of trailing tabs after the meaningful cells.
+    # They add no data but can make a small table needlessly expensive to parse.
+    content = "\n".join(line.rstrip("\t") for line in content.split("\n"))
     encoded = content.encode("utf-8-sig")
     if len(encoded) > settings.max_upload_bytes:
         raise ServiceError("PASTE_TOO_LARGE", "粘贴内容超过 50MB 限制", 413)

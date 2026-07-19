@@ -4,6 +4,7 @@ import csv
 import base64
 import io
 import json
+import re
 import sys
 import time
 import zipfile
@@ -425,7 +426,16 @@ def test_xlsx_named_legacy_workbook_is_detected_as_xls(tmp_path: Path) -> None:
 
 def test_paste_import_accepts_excel_clipboard_tsv_and_runs_quality_gate(app_client) -> None:
     app, client = app_client
-    content = pd.DataFrame(source_rows()).to_csv(index=False, sep="\t")
+    clipboard_rows = pd.DataFrame(source_rows())
+    clipboard_rows["日期"] = clipboard_rows["日期"].map(
+        lambda value: (
+            f"{date.fromisoformat(value).month}月{date.fromisoformat(value).day}日"
+            if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+            else value
+        )
+    )
+    # Simulate Excel's trailing empty cells when a full worksheet row is copied.
+    content = "\n".join(line + ("\t" * 300) for line in clipboard_rows.to_csv(index=False, sep="\t").splitlines())
     accepted = client.post(
         "/api/v1/datasets/paste-imports",
         json={"kind": "temporary", "name": "七月现场粘贴", "content": content},
