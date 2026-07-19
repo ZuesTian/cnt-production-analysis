@@ -32,7 +32,7 @@ from auth import (
     verify_password,
 )
 from models import Dataset, ExportArtifact, ShiftRecord, utcnow
-from services.import_service import _similar_operator_pairs
+from services.import_service import _record_classes, _similar_operator_pairs
 
 
 SOURCE_COLUMNS = [
@@ -63,6 +63,23 @@ def test_similar_operator_names_are_only_reported_as_review_hints() -> None:
 
     assert ["张小明", "张晓明"] in pairs
     assert ["王刚", "王强"] not in pairs
+
+
+def test_incomplete_production_rows_never_leave_nullable_validity_flags() -> None:
+    frame = pd.DataFrame(
+        {
+            "反应时间": pd.Series([pd.NA, 8.0, pd.NA], dtype="Float64"),
+            "产量": pd.Series([1075.0, 800.0, pd.NA], dtype="Float64"),
+            "故障时间": [0.0, 0.0, 0.0],
+            "空烧时间": [0.0, 0.0, 0.0],
+        }
+    )
+
+    classes, valid, _masks = _record_classes(frame)
+
+    assert classes.tolist() == ["incomplete_production", "production", "empty"]
+    assert valid.isna().sum() == 0
+    assert valid.tolist() == [True, True, False]
 
 
 def test_remote_api_requires_bearer_token_and_supports_cors(tmp_path: Path, monkeypatch) -> None:
@@ -311,6 +328,13 @@ def csv_bytes(rows: list[dict[str, object]]) -> bytes:
     return buffer.getvalue().encode("utf-8-sig")
 
 
+def spreadsheet_bytes(rows: list[dict[str, object]], engine: str = "openpyxl") -> bytes:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine=engine) as writer:
+        pd.DataFrame(rows).to_excel(writer, sheet_name="L3生产数据", index=False)
+    return buffer.getvalue()
+
+
 def wait_job(client: TestClient, job_id: str, timeout: float = 20) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -334,6 +358,63 @@ def import_dataset(client: TestClient, rows: list[dict[str, object]], kind: str 
     job = wait_job(client, payload["job_id"])
     assert job["status"] == "completed", job.get("error_detail")
     return payload["dataset_id"], job
+
+
+def test_file_import_accepts_xlsx_xlsm_ods_tsv_and_txt(app_client) -> None:
+    _app, client = app_client
+    rows = source_rows()
+    xlsx = spreadsheet_bytes(rows)
+    ods = spreadsheet_bytes(rows, "odf")
+    tabular = pd.DataFrame(rows).to_csv(index=False, sep="\t").encode("utf-8-sig")
+    pipe = pd.DataFrame(rows).to_csv(index=False, sep="|").encode("gb18030")
+    samples = [
+        ("production.xlsx", xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("production.xlsm", xlsx, "application/vnd.ms-excel.sheet.macroEnabled.12"),
+        ("production.ods", ods, "application/vnd.oasis.opendocument.spreadsheet"),
+        ("production.tsv", tabular, "text/tab-separated-values"),
+        ("production.txt", pipe, "text/plain"),
+    ]
+
+    for filename, content, content_type in samples:
+        accepted = client.post(
+            "/api/v1/datasets/imports",
+            files={"file": (filename, content, content_type)},
+            data={"kind": "temporary", "name": filename},
+        )
+        assert accepted.status_code == 202, accepted.text
+        job = wait_job(client, accepted.json()["job_id"])
+        assert job["status"] == "completed", job.get("error_detail")
+        quality = client.get(f"/api/v1/datasets/{accepted.json()['dataset_id']}/quality")
+        assert quality.status_code == 200
+        assert quality.json()["dataset"]["row_count"] > 0
+
+
+def test_paste_import_accepts_excel_clipboard_tsv_and_runs_quality_gate(app_client) -> None:
+    app, client = app_client
+    content = pd.DataFrame(source_rows()).to_csv(index=False, sep="\t")
+    accepted = client.post(
+        "/api/v1/datasets/paste-imports",
+        json={"kind": "temporary", "name": "七月现场粘贴", "content": content},
+    )
+
+    assert accepted.status_code == 202, accepted.text
+    payload = accepted.json()
+    job = wait_job(client, payload["job_id"])
+    assert job["status"] == "completed", job.get("error_detail")
+    quality = client.get(f"/api/v1/datasets/{payload['dataset_id']}/quality").json()
+    assert quality["dataset"]["name"] == "七月现场粘贴"
+    assert quality["dataset"]["row_count"] > 0
+    with app.state.SessionLocal() as session:
+        dataset = session.get(Dataset, payload["dataset_id"])
+        assert dataset.original_filename == "七月现场粘贴.tsv"
+        assert Path(dataset.stored_path).suffix == ".tsv"
+
+    invalid = client.post(
+        "/api/v1/datasets/paste-imports",
+        json={"kind": "temporary", "name": "无效粘贴", "content": "只有一列\n没有分隔符"},
+    )
+    assert invalid.status_code == 415
+    assert invalid.json()["code"] == "FILE_FORMAT_MISMATCH"
 
 
 def publish_dataset(client: TestClient, dataset_id: str, activate: bool = False) -> dict:

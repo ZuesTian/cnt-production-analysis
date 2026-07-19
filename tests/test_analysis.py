@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+import shutil
 import sys
 
 import numpy as np
@@ -86,6 +87,80 @@ def test_load_and_clean_data_reports_file_level_missing_columns(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="必需列"):
         analysis.load_and_clean_data(workbook)
+
+
+def _multi_format_source() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "生产日期": "2026-07-01",
+                "班组": "白班张三",
+                "炉号": "E01",
+                "反应时间": 8,
+                "故障时间": 0,
+                "空烧时间": 0,
+                "产量": 800,
+                "源表小时产能": 100,
+            },
+            {
+                "生产日期": "2026-07-01",
+                "班组": "夜班李四",
+                "炉号": "11A-01",
+                "反应时间": 6,
+                "故障时间": 1,
+                "空烧时间": 0,
+                "产量": 540,
+                "源表小时产能": 90,
+            },
+        ]
+    )
+
+
+def test_spreadsheets_detect_header_rows_aliases_xlsm_and_ods(tmp_path: Path) -> None:
+    source = _multi_format_source()
+    xlsx = tmp_path / "metadata.xlsx"
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+        source.to_excel(writer, sheet_name="L3数据", index=False, startrow=2)
+
+    cycles = analysis.load_and_clean_data(xlsx, use_cache=False)
+    assert len(cycles) == 2
+    assert cycles.iloc[0]["来源行号"] == 4
+    assert cycles.iloc[0]["反应时间"] == pytest.approx(8)
+
+    xlsm = tmp_path / "metadata.xlsm"
+    shutil.copyfile(xlsx, xlsm)
+    assert len(analysis.load_and_clean_data(xlsm, use_cache=False)) == 2
+
+    ods = tmp_path / "metadata.ods"
+    with pd.ExcelWriter(ods, engine="odf") as writer:
+        source.to_excel(writer, sheet_name="L3数据", index=False)
+    assert len(analysis.load_and_clean_data(ods, use_cache=False)) == 2
+
+
+@pytest.mark.parametrize(
+    ("suffix", "delimiter", "encoding"),
+    [
+        (".tsv", "\t", "utf-8-sig"),
+        (".txt", "|", "utf-8"),
+        (".csv", ";", "gb18030"),
+    ],
+)
+def test_delimited_formats_detect_delimiter_encoding_and_metadata_header(
+    tmp_path: Path,
+    suffix: str,
+    delimiter: str,
+    encoding: str,
+) -> None:
+    source = _multi_format_source()
+    path = tmp_path / f"production{suffix}"
+    body = "数据来源：生产现场\n导出时间：2026-07-19\n" + source.to_csv(index=False, sep=delimiter)
+    path.write_bytes(body.encode(encoding))
+
+    cycles = analysis.load_and_clean_data(path, use_cache=False)
+
+    assert len(cycles) == 2
+    assert set(cycles["生产线"]) == {"L3", "11A"}
+    assert cycles.iloc[0]["来源行号"] == 4
 
 
 def test_resolve_furnaces_supports_exact_and_prefix() -> None:

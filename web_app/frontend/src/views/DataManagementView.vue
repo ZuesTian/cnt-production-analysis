@@ -9,12 +9,15 @@ import type { DatasetSummary, JobStatus, QualityReport } from '@/types/api'
 import PageHeader from '@/components/PageHeader.vue'
 import QualityBadge from '@/components/QualityBadge.vue'
 import StatePanel from '@/components/StatePanel.vue'
+import { parseClipboardPreview, REQUIRED_SOURCE_HEADERS } from '@/utils/tabularPaste'
 
 const context = useContextStore(); const jobs = useJobsStore()
 const { datasets } = storeToRefs(context)
 const kind = ref<'shared' | 'temporary'>('shared')
+const sourceMode = ref<'file' | 'paste'>('file')
 const name = ref('')
 const file = ref<File | null>(null)
+const pasteContent = ref('')
 const job = ref<JobStatus | null>(null)
 const quality = ref<QualityReport | null>(null)
 const importing = ref(false)
@@ -22,9 +25,12 @@ const publishing = ref(false)
 const riskAcknowledged = ref(false)
 const completeDates = ref<Record<string, string>>({})
 const input = ref<HTMLInputElement>()
+const acceptedExtensions = ['.xlsx', '.xlsm', '.xls', '.ods', '.csv', '.tsv', '.txt']
+const pastePreview = computed(() => parseClipboardPreview(pasteContent.value))
+const sourceReady = computed(() => sourceMode.value === 'file' ? Boolean(file.value) : pastePreview.value.valid)
 
 const step = computed(() => {
-  if (!file.value) return 0
+  if (!sourceReady.value) return 0
   if (job.value && ['queued', 'running'].includes(job.value.status)) return 1
   if (quality.value?.dataset.status === 'published') return 3
   if (quality.value) return 2
@@ -34,28 +40,48 @@ const sharedDatasets = computed(() => datasets.value.filter((item) => item.kind 
 const highIssues = computed(() => quality.value?.issues.filter((item) => ['high', 'critical'].includes(item.severity)) || [])
 const canPublish = computed(() => quality.value?.dataset.kind === 'shared' && quality.value.dataset.status === 'ready' && (highIssues.value.length === 0 || riskAcknowledged.value))
 
-function fileSelected(event: Event) {
-  const selected = (event.target as HTMLInputElement).files?.[0] || null
-  if (selected && selected.size > 50 * 1024 * 1024) { ElMessage.error('文件超过 50MB 限制'); return }
-  file.value = selected; name.value ||= selected?.name.replace(/\.[^.]+$/, '') || ''
+function setSelectedFile(selected: File | null) {
+  if (!selected) return
+  const extension = selected.name.match(/\.[^.]+$/)?.[0].toLowerCase() || ''
+  if (extension === '.xlxs') { ElMessage.error('扩展名应为 .xlsx，不是 .xlxs；请修正文件名后重试'); return }
+  if (!acceptedExtensions.includes(extension)) { ElMessage.error(`不支持 ${extension || '无扩展名'} 文件，请选择 Excel、ODS 或分隔文本`); return }
+  if (selected.size > 50 * 1024 * 1024) { ElMessage.error('文件超过 50MB 限制'); return }
+  file.value = selected; name.value ||= selected.name.replace(/\.[^.]+$/, '')
   job.value = null; quality.value = null; riskAcknowledged.value = false
 }
 
-async function importFile() {
-  if (!file.value) { ElMessage.warning('请先选择数据文件'); return }
+function fileSelected(event: Event) { setSelectedFile((event.target as HTMLInputElement).files?.[0] || null) }
+function fileDropped(event: DragEvent) { setSelectedFile(event.dataTransfer?.files?.[0] || null) }
+
+async function readClipboard() {
+  try {
+    pasteContent.value = await navigator.clipboard.readText()
+    if (!pasteContent.value.trim()) ElMessage.warning('剪贴板中没有文本数据')
+  } catch { ElMessage.warning('浏览器未授权读取剪贴板，请在输入框中按 Ctrl+V 粘贴') }
+}
+
+async function finishImport(accepted: { job_id: string; dataset_id: string }) {
+  jobs.startPolling(); job.value = await jobs.waitFor(accepted.job_id)
+  if (job.value.status !== 'completed') throw new Error(job.value.error_detail?.split('\n')[0] || '数据预检失败')
+  quality.value = await api.quality(accepted.dataset_id)
+  completeDates.value = { ...quality.value.dataset.complete_dates }
+  await context.refreshDatasets()
+  if (kind.value === 'temporary') {
+    await context.selectDataset(accepted.dataset_id)
+    ElMessage.success('临时数据预检完成，已切换为当前分析版本')
+  } else ElMessage.success('共享快照预检完成，请确认质量报告后发布')
+}
+
+async function importSource() {
+  if (!sourceReady.value) { ElMessage.warning(sourceMode.value === 'file' ? '请先选择数据文件' : pastePreview.value.error || '请先粘贴完整表格'); return }
   importing.value = true
   try {
-    const form = new FormData(); form.append('file', file.value); form.append('kind', kind.value); form.append('name', name.value || file.value.name)
-    const accepted = await api.importDataset(form)
-    jobs.startPolling(); job.value = await jobs.waitFor(accepted.job_id)
-    if (job.value.status !== 'completed') throw new Error(job.value.error_detail || '数据预检失败')
-    quality.value = await api.quality(accepted.dataset_id)
-    completeDates.value = { ...quality.value.dataset.complete_dates }
-    await context.refreshDatasets()
-    if (kind.value === 'temporary') {
-      await context.selectDataset(accepted.dataset_id)
-      ElMessage.success('临时数据预检完成，已切换为当前分析版本')
-    } else ElMessage.success('共享快照预检完成，请确认质量报告后发布')
+    if (sourceMode.value === 'file' && file.value) {
+      const form = new FormData(); form.append('file', file.value); form.append('kind', kind.value); form.append('name', name.value || file.value.name)
+      await finishImport(await api.importDataset(form))
+    } else {
+      await finishImport(await api.importPastedDataset({ kind: kind.value, name: name.value || `粘贴数据 ${new Date().toLocaleDateString('zh-CN')}`, content: pasteContent.value }))
+    }
   } catch (caught) {
     ElMessage.error(caught instanceof ApiError ? caught.message : caught instanceof Error ? caught.message : '导入失败')
   } finally { importing.value = false }
@@ -95,7 +121,7 @@ async function activate(dataset: DatasetSummary) {
 }
 
 function resetImport() {
-  file.value = null; name.value = ''; job.value = null; quality.value = null; riskAcknowledged.value = false
+  file.value = null; pasteContent.value = ''; name.value = ''; job.value = null; quality.value = null; riskAcknowledged.value = false
   if (input.value) input.value.value = ''
 }
 function severityLabel(value: string) { return ({ critical: '阻断', high: '高', medium: '中', low: '低', info: '信息' } as Record<string, string>)[value] || value }
@@ -106,25 +132,37 @@ onMounted(() => void context.refreshDatasets())
   <div class="view data-view">
     <div class="desktop-only-content">
       <PageHeader eyebrow="DATA GOVERNANCE" title="数据管理" description="每次共享导入都是不可变快照：预检、确认、发布，必要时可回滚。">
-        <div class="data-policy"><span>50 MB</span><span>100,000 行</span><span>24h 临时保留</span></div>
+        <div class="data-policy"><span>7 种格式</span><span>100,000 行</span><span>24h 临时保留</span></div>
       </PageHeader>
 
       <section class="import-workbench">
-        <header><div><p class="eyebrow">CONTROLLED IMPORT</p><h2>导入新数据版本</h2></div><el-steps :active="step" finish-status="success" simple><el-step title="选择文件" /><el-step title="自动预检" /><el-step title="质量确认" /><el-step title="发布" /></el-steps></header>
+        <header><div><p class="eyebrow">CONTROLLED IMPORT</p><h2>导入新数据版本</h2></div><el-steps :active="step" finish-status="success" simple><el-step title="提供数据" /><el-step title="自动预检" /><el-step title="质量确认" /><el-step title="发布" /></el-steps></header>
         <div class="import-grid">
           <div class="import-controls">
             <label class="control-label"><span>使用方式</span><el-segmented v-model="kind" :options="[{ label: '共享快照', value: 'shared' }, { label: '临时分析', value: 'temporary' }]" /></label>
             <label class="control-label"><span>版本名称</span><el-input v-model="name" maxlength="80" placeholder="例如：2026 年 4 月正式数据" /></label>
-            <label class="file-drop">
-              <input ref="input" class="sr-only" type="file" accept=".xlsx,.xls,.csv" @change="fileSelected" />
+            <label class="control-label"><span>数据来源</span><el-segmented v-model="sourceMode" :options="[{ label: '上传文件', value: 'file' }, { label: '粘贴表格', value: 'paste' }]" /></label>
+            <label v-if="sourceMode === 'file'" class="file-drop" @dragover.prevent @drop.prevent="fileDropped">
+              <input ref="input" class="sr-only" type="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.tsv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="fileSelected" />
               <span class="file-drop__symbol" aria-hidden="true">＋</span>
-              <strong>{{ file ? file.name : '选择 Excel 或 CSV 文件' }}</strong>
-              <small>{{ file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : '服务器将生成安全文件名并校验真实格式' }}</small>
+              <strong>{{ file ? file.name : '点击选择或拖入数据文件' }}</strong>
+              <small>{{ file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : 'Excel：xlsx / xlsm / xls · 表格：ods · 文本：csv / tsv / txt' }}</small>
             </label>
-            <div class="import-actions"><el-button @click="resetImport">清空</el-button><el-button type="primary" :loading="importing" :disabled="!file" @click="importFile">上传并预检</el-button></div>
+            <div v-else class="paste-source">
+              <div class="paste-source__head"><div><strong>粘贴 Excel 单元格区域</strong><span>第一行应为字段名，支持制表符、逗号、分号或竖线</span></div><el-button plain @click="readClipboard">读取剪贴板</el-button></div>
+              <el-input v-model="pasteContent" type="textarea" :rows="8" resize="vertical" aria-label="粘贴生产数据" :placeholder="`${REQUIRED_SOURCE_HEADERS.join('\t')}\n2026-07-01\t白班张三\tE01\t8\t0\t0\t800\t100`" />
+              <div v-if="pasteContent" class="paste-status" :class="{ 'paste-status--error': !pastePreview.valid }">
+                <span v-if="pastePreview.valid">已识别 {{ pastePreview.delimiterLabel }} · {{ pastePreview.columnCount }} 列 · 约 {{ pastePreview.totalRows.toLocaleString() }} 行</span>
+                <span v-else>{{ pastePreview.error }}</span>
+              </div>
+              <div v-if="pastePreview.headers.length" class="paste-table-wrap" aria-label="粘贴数据预览">
+                <table class="paste-table"><thead><tr><th v-for="(header, column) in pastePreview.headers" :key="`${header}-${column}`">{{ header }}</th></tr></thead><tbody><tr v-for="(row, rowIndex) in pastePreview.rows" :key="rowIndex"><td v-for="(_header, column) in pastePreview.headers" :key="column">{{ row[column] || '' }}</td></tr></tbody></table>
+              </div>
+            </div>
+            <div class="import-actions"><el-button @click="resetImport">清空</el-button><el-button type="primary" :loading="importing" :disabled="!sourceReady" @click="importSource">{{ sourceMode === 'file' ? '上传并预检' : '粘贴并预检' }}</el-button></div>
           </div>
           <aside class="import-explainer">
-            <div><span>01</span><p><strong>结构与格式检查</strong>必需列、真实文件格式、日期及数值范围</p></div>
+            <div><span>01</span><p><strong>格式与表头识别</strong>校验真实格式，并自动查找前 30 行中的字段表头</p></div>
             <div><span>02</span><p><strong>可信度分析</strong>配对完整率、空记录、重复粒度、班组变体</p></div>
             <div><span>03</span><p><strong>不可变入库</strong>建立版本、炉日聚合建议与文件哈希</p></div>
           </aside>

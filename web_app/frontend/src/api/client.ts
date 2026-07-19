@@ -7,6 +7,7 @@ import type {
   JobStatus,
   LoginResponse,
   OverviewResponse,
+  PasteImportPayload,
   QualityReport,
   SeriesResponse,
 } from '@/types/api'
@@ -128,6 +129,7 @@ export const api = {
   createExport: (body: Record<string, unknown>) => request<{ job_id: string; dataset_id: string }>('/api/v1/exports', { method: 'POST', body: JSON.stringify(body) }),
   publish: (id: string, body: Record<string, unknown>, activate = false) => request<DatasetSummary>(`/api/v1/datasets/${id}/${activate ? 'activate' : 'publish'}`, { method: 'POST', body: JSON.stringify(body) }),
   importDataset: (form: FormData) => request<{ job_id: string; dataset_id: string }>('/api/v1/datasets/imports', { method: 'POST', body: form }),
+  importPastedDataset: (body: PasteImportPayload) => request<{ job_id: string; dataset_id: string }>('/api/v1/datasets/paste-imports', { method: 'POST', body: JSON.stringify(body) }),
   downloadExport: async (artifact: ExportArtifact) => {
     const response = await fetchResponse(`/api/v1/exports/${artifact.id}/download`)
     if (!response.ok) {

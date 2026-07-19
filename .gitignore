@@ -40,6 +40,7 @@ web_app/server-*.log
 *.xlsx
 *.xls
 *.csv
+!tests/fixtures/*.xlsx
 
 # 文档
 应用需求文档.md

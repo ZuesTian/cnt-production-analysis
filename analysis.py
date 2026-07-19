@@ -15,11 +15,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import contextlib
 import hashlib
 import io
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,7 +51,9 @@ def resolve_output_dir(output_dir: Path | str | None = None) -> Path:
     return target
 CONFIG_FILE = Path("config.yaml")
 EXCEL_BASE_DATE = datetime(1899, 12, 30)
-SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+SPREADSHEET_EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".ods"}
+DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv", ".txt"}
+SUPPORTED_EXTENSIONS = SPREADSHEET_EXTENSIONS | DELIMITED_TEXT_EXTENSIONS
 
 DEFAULT_SOURCE_COLUMNS = {
     "date": "日期",
@@ -60,6 +64,23 @@ DEFAULT_SOURCE_COLUMNS = {
     "clean_empty_burn_time": "停机清理空烧",
     "output": "产量",
     "source_yield": "小时产能",
+}
+
+SOURCE_COLUMN_ALIASES = {
+    "date": ("日期", "生产日期", "date", "production date"),
+    "team": ("班组", "班次班组", "班次/班组", "team", "shift team"),
+    "furnace": ("炉号", "炉次", "设备炉号", "furnace", "furnace id"),
+    "reaction_time": ("生产时间", "反应时间", "生产时长", "reaction time"),
+    "fault_time": ("设备故障影响时间", "故障时间", "故障时长", "fault time"),
+    "clean_empty_burn_time": (
+        "停机清理空烧",
+        "停机清理/空烧",
+        "清理空烧时间",
+        "空烧时间",
+        "clean empty burn time",
+    ),
+    "output": ("产量", "生产量", "output", "production output"),
+    "source_yield": ("小时产能", "源表小时产能", "小时产量", "yield", "hourly output"),
 }
 
 DEFAULT_PRODUCTION_LINES = {
@@ -235,7 +256,8 @@ def find_input_file(path_arg: str | None = None) -> Path:
         if not path.exists():
             raise FileNotFoundError(f"找不到输入文件：{path}")
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            raise ValueError(f"不支持的输入格式：{path.suffix}，请使用 .xlsx / .xls / .csv")
+            supported = " / ".join(sorted(SUPPORTED_EXTENSIONS))
+            raise ValueError(f"不支持的输入格式：{path.suffix}，请使用 {supported}")
         return path
 
     candidates = [
@@ -245,7 +267,8 @@ def find_input_file(path_arg: str | None = None) -> Path:
         and path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
     if not candidates:
-        raise FileNotFoundError("当前目录未找到 .xlsx / .xls / .csv 输入文件")
+        supported = " / ".join(sorted(SUPPORTED_EXTENSIONS))
+        raise FileNotFoundError(f"当前目录未找到支持的数据文件（{supported}）")
 
     exact = [path for path in candidates if "生产数据" in path.name]
     return sorted(exact or candidates, key=lambda p: p.name)[0]
@@ -355,33 +378,156 @@ def production_lines_from_furnaces(furnaces: pd.Series, fallback: str) -> pd.Ser
     return result
 
 
+def normalize_source_header(value: object) -> str:
+    """Normalize harmless header differences without changing production data."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).replace("\ufeff", "").strip().lower()
+    text = re.sub(r"[\s\u3000]+", "", text)
+    text = re.sub(r"[（(](?:h|小时|kg/h|公斤/小时)[）)]$", "", text)
+    return text
+
+
+def _source_alias_lookup() -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for logical_name, target in SOURCE_COLUMNS.items():
+        aliases = (*SOURCE_COLUMN_ALIASES.get(logical_name, ()), target)
+        for alias in aliases:
+            lookup[normalize_source_header(alias)] = target
+    return lookup
+
+
 def required_usecols(column: str) -> bool:
-    return column in REQUIRED_SOURCE_COLUMNS
+    return normalize_source_header(column) in _source_alias_lookup()
+
+
+def canonicalize_source_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Map supported aliases to the configured source schema."""
+    lookup = _source_alias_lookup()
+    target_norms = {target: normalize_source_header(target) for target in REQUIRED_SOURCE_COLUMNS}
+    columns = list(df.columns)
+    renames: dict[object, str] = {}
+    used_columns: set[object] = set()
+    for target in REQUIRED_SOURCE_COLUMNS:
+        candidates = [
+            column
+            for column in columns
+            if column not in used_columns and lookup.get(normalize_source_header(column)) == target
+        ]
+        if not candidates:
+            continue
+        exact = next(
+            (column for column in candidates if normalize_source_header(column) == target_norms[target]),
+            candidates[0],
+        )
+        renames[exact] = target
+        used_columns.add(exact)
+    return df.rename(columns=renames)
+
+
+def _find_header_row(rows: Iterable[Iterable[object]], *, max_rows: int = 30) -> int:
+    required = set(REQUIRED_SOURCE_COLUMNS)
+    lookup = _source_alias_lookup()
+    for index, row in enumerate(rows):
+        if index >= max_rows:
+            break
+        present = {
+            lookup[normalized]
+            for value in row
+            if (normalized := normalize_source_header(value)) in lookup
+        }
+        if required.issubset(present):
+            return index
+    return 0
+
+
+def _decode_delimited_text(path: Path) -> tuple[str, str]:
+    raw = path.read_bytes()
+    last_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8-sig", "gb18030", "gbk"):
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return raw.decode("utf-8-sig"), "utf-8-sig"
+
+
+def _detect_delimiter_and_header(text: str) -> tuple[str, int]:
+    sample = text[:256_000]
+    lookup = _source_alias_lookup()
+    best: tuple[int, int, int, str, int] | None = None
+    for priority, delimiter in enumerate(("\t", ",", ";", "|")):
+        try:
+            rows = list(csv.reader(io.StringIO(sample), delimiter=delimiter))
+        except csv.Error:
+            continue
+        header_row = _find_header_row(rows)
+        widths = [len(row) for row in rows[:30] if any(str(cell).strip() for cell in row)]
+        width = max(widths, default=0)
+        present = {
+            lookup[normalized]
+            for value in (rows[header_row] if rows and header_row < len(rows) else [])
+            if (normalized := normalize_source_header(value)) in lookup
+        }
+        exact_header = int(set(REQUIRED_SOURCE_COLUMNS).issubset(present))
+        candidate = (exact_header, width, -priority, delimiter, header_row)
+        if best is None or candidate[:3] > best[:3]:
+            best = candidate
+    if best is None or best[1] <= 1:
+        raise ValueError("无法识别分隔符，请使用制表符、逗号、分号或竖线分隔数据")
+    return best[3], best[4]
+
+
+def read_delimited_with_fallback(path: Path) -> pd.DataFrame:
+    """Read CSV/TSV/TXT files with delimiter, encoding and header detection."""
+    text, encoding = _decode_delimited_text(path)
+    delimiter, header_row = _detect_delimiter_and_header(text)
+    frame = pd.read_csv(
+        path,
+        encoding=encoding,
+        sep=delimiter,
+        header=header_row,
+        engine="python",
+        usecols=required_usecols,
+    )
+    frame = canonicalize_source_columns(frame)
+    frame.attrs["source_header_row"] = header_row
+    return frame
 
 
 def read_csv_with_fallback(path: Path) -> pd.DataFrame:
-    """Read CSV files with common Chinese encodings."""
-    last_error: Exception | None = None
-    for encoding in ("utf-8-sig", "gbk", "gb18030"):
-        try:
-            return pd.read_csv(path, encoding=encoding, usecols=required_usecols)
-        except UnicodeDecodeError as exc:
-            last_error = exc
+    """Backward-compatible alias for callers of the original CSV reader."""
+    return read_delimited_with_fallback(path)
 
-    if last_error:
-        raise last_error
-    return pd.read_csv(path, usecols=required_usecols)
+
+def _read_spreadsheet_sheet(excel: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    preview = pd.read_excel(excel, sheet_name=sheet_name, header=None, nrows=30)
+    header_row = _find_header_row(preview.itertuples(index=False, name=None))
+    frame = pd.read_excel(
+        excel,
+        sheet_name=sheet_name,
+        header=header_row,
+        usecols=required_usecols,
+    )
+    frame = canonicalize_source_columns(frame)
+    frame.attrs["source_header_row"] = header_row
+    return frame
 
 
 def iter_source_tables(input_file: Path) -> Iterable[tuple[int, str, pd.DataFrame]]:
-    """Yield source tables from Excel sheets or one CSV file."""
-    if input_file.suffix.lower() == ".csv":
-        yield 0, input_file.stem, read_csv_with_fallback(input_file)
+    """Yield source tables from supported spreadsheets or delimited text files."""
+    extension = input_file.suffix.lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise ValueError(f"不支持的输入格式：{extension}")
+    if extension in DELIMITED_TEXT_EXTENSIONS:
+        yield 0, input_file.stem, read_delimited_with_fallback(input_file)
         return
 
     excel = pd.ExcelFile(input_file)
     for sheet_index, sheet_name in enumerate(excel.sheet_names):
-        yield sheet_index, sheet_name, pd.read_excel(input_file, sheet_name=sheet_name, usecols=required_usecols)
+        yield sheet_index, sheet_name, _read_spreadsheet_sheet(excel, sheet_name)
 
 
 def missing_required_columns(df: pd.DataFrame) -> list[str]:
@@ -407,7 +553,7 @@ def cache_key_for_input(input_file: Path) -> str:
         "mtime_ns": stat.st_mtime_ns,
         "source_columns": SOURCE_COLUMNS,
         "production_lines": PRODUCTION_LINES,
-        "version": 5,
+        "version": 6,
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
@@ -580,7 +726,8 @@ def load_and_clean_data(input_file: Path, *, use_cache: bool = True) -> pd.DataF
         ].copy()
 
         df["来源工作表"] = sheet_name
-        df["来源行号"] = np.arange(2, len(df) + 2)
+        source_header_row = int(df.attrs.get("source_header_row", 0))
+        df["来源行号"] = np.arange(source_header_row + 2, len(df) + source_header_row + 2)
         df["工作表顺序"] = sheet_index
         sheet_line = production_line_from_sheet(sheet_name)
 

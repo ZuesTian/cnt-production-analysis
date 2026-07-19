@@ -56,4 +56,20 @@ describe('API client', () => {
     expect(headers.has('Authorization')).toBe(false)
     expect(JSON.parse(String(options.body))).toEqual({ username: 'member', password: 'password' })
   })
+
+  it('posts pasted tabular data as a protected JSON import', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ job_id: 'job-1', dataset_id: 'data-1' }), { status: 202, headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    setAccessToken('signed-session')
+
+    await api.importPastedDataset({ kind: 'temporary', name: '现场粘贴', content: '日期\t班组' })
+
+    expect(fetchMock.mock.calls[0][0]).toContain('/api/v1/datasets/paste-imports')
+    const options = fetchMock.mock.calls[0][1] as RequestInit
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(String(options.body))).toEqual({ kind: 'temporary', name: '现场粘贴', content: '日期\t班组' })
+    expect(new Headers(options.headers).get('Authorization')).toBe('Bearer signed-session')
+  })
 })

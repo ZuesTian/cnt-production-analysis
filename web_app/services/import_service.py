@@ -81,10 +81,10 @@ def _record_classes(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, dict[str, p
     fault = pd.to_numeric(df["故障时间"], errors="coerce").fillna(0)
     clean = pd.to_numeric(df["空烧时间"], errors="coerce").fillna(0)
 
-    production = reaction.gt(0) & output.notna() & output.ge(0)
-    downtime = reaction.isna() & output.isna() & ((fault > 0) | (clean > 0))
-    incomplete = reaction.notna() ^ output.notna()
-    empty = reaction.isna() & output.isna() & ~downtime
+    production = (reaction.gt(0) & output.notna() & output.ge(0)).fillna(False)
+    downtime = (reaction.isna() & output.isna() & ((fault > 0) | (clean > 0))).fillna(False)
+    incomplete = (reaction.notna() ^ output.notna()).fillna(False)
+    empty = (reaction.isna() & output.isna() & ~downtime).fillna(False)
     invalid = (
         reaction.lt(0).fillna(False)
         | output.lt(0).fillna(False)
@@ -93,8 +93,8 @@ def _record_classes(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, dict[str, p
         | reaction.gt(24).fillna(False)
         | fault.gt(24).fillna(False)
         | clean.gt(24).fillna(False)
-        | (reaction.eq(0) & output.notna())
-    )
+        | (reaction.eq(0).fillna(False) & output.notna())
+    ).fillna(False)
 
     classes = pd.Series("other", index=df.index, dtype="object")
     classes.loc[production] = "production"
