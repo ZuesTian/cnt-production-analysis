@@ -94,6 +94,27 @@ def _parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
+OLE_WORKBOOK_SIGNATURE = bytes.fromhex("D0CF11E0A1B11AE1")
+
+
+def _resolve_content_extension(path: Path, requested_extension: str) -> str:
+    """Use a safe, narrow compatibility fallback for incorrectly named Excel files."""
+    with path.open("rb") as source:
+        header = source.read(16)
+    if requested_extension == ".xlsx" and header.startswith(OLE_WORKBOOK_SIGNATURE):
+        return ".xls"
+    if requested_extension == ".xls" and header.startswith(b"PK"):
+        try:
+            with zipfile.ZipFile(path) as workbook:
+                names = set(workbook.namelist())
+                if {"mimetype", "content.xml"}.issubset(names):
+                    return ".ods"
+        except zipfile.BadZipFile:
+            return requested_extension
+        return ".xlsx"
+    return requested_extension
+
+
 def _verify_signature(path: Path, extension: str) -> None:
     with path.open("rb") as source:
         header = source.read(16)
@@ -129,7 +150,7 @@ def _verify_signature(path: Path, extension: str) -> None:
                     raise ServiceError("FILE_FORMAT_MISMATCH", "ODS 文件类型标识无效", 415)
         except zipfile.BadZipFile as exc:
             raise ServiceError("FILE_FORMAT_MISMATCH", "ODS 压缩结构无效", 415) from exc
-    if extension == ".xls" and not header.startswith(bytes.fromhex("D0CF11E0A1B11AE1")):
+    if extension == ".xls" and not header.startswith(OLE_WORKBOOK_SIGNATURE):
         raise ServiceError("FILE_FORMAT_MISMATCH", "文件扩展名与 Excel xls 格式不匹配", 415)
     if extension in {".csv", ".tsv", ".txt"}:
         with path.open("rb") as source:
@@ -297,7 +318,10 @@ async def create_import(
 ) -> dict[str, str]:
     request.app.state.upload_limiter.check(_client_ip(request))
     original_name = Path(file.filename or "data").name
-    extension = Path(original_name).suffix.lower()
+    supplied_extension = Path(original_name).suffix.lower()
+    # `.xlxs` is a common typo for `.xlsx`. Keep the displayed original filename
+    # for traceability, but only process it through the normal OOXML validator.
+    extension = ".xlsx" if supplied_extension == ".xlxs" else supplied_extension
     if extension not in settings.allowed_extensions:
         raise ServiceError(
             "UNSUPPORTED_FILE_TYPE",
@@ -319,6 +343,12 @@ async def create_import(
                 target.write(chunk)
         if size == 0:
             raise ServiceError("EMPTY_FILE", "上传文件为空", 422)
+        detected_extension = _resolve_content_extension(stored_path, extension)
+        if detected_extension != extension:
+            normalized_path = settings.import_dir / f"{dataset_id}{detected_extension}"
+            stored_path.replace(normalized_path)
+            stored_path = normalized_path
+            extension = detected_extension
         _verify_signature(stored_path, extension)
     except Exception:
         stored_path.unlink(missing_ok=True)

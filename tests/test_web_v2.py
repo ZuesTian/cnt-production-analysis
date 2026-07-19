@@ -32,6 +32,7 @@ from auth import (
     verify_password,
 )
 from models import Dataset, ExportArtifact, ShiftRecord, utcnow
+from routes.api_v1 import _resolve_content_extension
 from services.import_service import _record_classes, _similar_operator_pairs
 
 
@@ -387,6 +388,38 @@ def test_file_import_accepts_xlsx_xlsm_ods_tsv_and_txt(app_client) -> None:
         quality = client.get(f"/api/v1/datasets/{accepted.json()['dataset_id']}/quality")
         assert quality.status_code == 200
         assert quality.json()["dataset"]["row_count"] > 0
+
+
+def test_xlxs_alias_is_normalized_to_xlsx_and_still_validated(app_client) -> None:
+    app, client = app_client
+    accepted = client.post(
+        "/api/v1/datasets/imports",
+        files={"file": ("现场生产数据.xlxs", spreadsheet_bytes(source_rows()), "application/octet-stream")},
+        data={"kind": "temporary", "name": "xlxs 兼容验收"},
+    )
+    assert accepted.status_code == 202, accepted.text
+    payload = accepted.json()
+    job = wait_job(client, payload["job_id"])
+    assert job["status"] == "completed", job.get("error_detail")
+    with app.state.SessionLocal() as session:
+        dataset = session.get(Dataset, payload["dataset_id"])
+        assert dataset.original_filename == "现场生产数据.xlxs"
+        assert Path(dataset.stored_path).suffix == ".xlsx"
+
+    invalid = client.post(
+        "/api/v1/datasets/imports",
+        files={"file": ("伪装文件.xlxs", b"not an Excel workbook", "application/octet-stream")},
+        data={"kind": "temporary"},
+    )
+    assert invalid.status_code == 415
+    assert invalid.json()["code"] == "FILE_FORMAT_MISMATCH"
+
+
+def test_xlsx_named_legacy_workbook_is_detected_as_xls(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy.xlsx"
+    legacy.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"legacy workbook placeholder")
+
+    assert _resolve_content_extension(legacy, ".xlsx") == ".xls"
 
 
 def test_paste_import_accepts_excel_clipboard_tsv_and_runs_quality_gate(app_client) -> None:

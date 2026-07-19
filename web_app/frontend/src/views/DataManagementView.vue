@@ -25,7 +25,7 @@ const publishing = ref(false)
 const riskAcknowledged = ref(false)
 const completeDates = ref<Record<string, string>>({})
 const input = ref<HTMLInputElement>()
-const acceptedExtensions = ['.xlsx', '.xlsm', '.xls', '.ods', '.csv', '.tsv', '.txt']
+const acceptedExtensions = ['.xlsx', '.xlxs', '.xlsm', '.xls', '.ods', '.csv', '.tsv', '.txt']
 const pastePreview = computed(() => parseClipboardPreview(pasteContent.value))
 const sourceReady = computed(() => sourceMode.value === 'file' ? Boolean(file.value) : pastePreview.value.valid)
 
@@ -43,7 +43,6 @@ const canPublish = computed(() => quality.value?.dataset.kind === 'shared' && qu
 function setSelectedFile(selected: File | null) {
   if (!selected) return
   const extension = selected.name.match(/\.[^.]+$/)?.[0].toLowerCase() || ''
-  if (extension === '.xlxs') { ElMessage.error('扩展名应为 .xlsx，不是 .xlxs；请修正文件名后重试'); return }
   if (!acceptedExtensions.includes(extension)) { ElMessage.error(`不支持 ${extension || '无扩展名'} 文件，请选择 Excel、ODS 或分隔文本`); return }
   if (selected.size > 50 * 1024 * 1024) { ElMessage.error('文件超过 50MB 限制'); return }
   file.value = selected; name.value ||= selected.name.replace(/\.[^.]+$/, '')
@@ -143,10 +142,10 @@ onMounted(() => void context.refreshDatasets())
             <label class="control-label"><span>版本名称</span><el-input v-model="name" maxlength="80" placeholder="例如：2026 年 4 月正式数据" /></label>
             <label class="control-label"><span>数据来源</span><el-segmented v-model="sourceMode" :options="[{ label: '上传文件', value: 'file' }, { label: '粘贴表格', value: 'paste' }]" /></label>
             <label v-if="sourceMode === 'file'" class="file-drop" @dragover.prevent @drop.prevent="fileDropped">
-              <input ref="input" class="sr-only" type="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.tsv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="fileSelected" />
+              <input ref="input" class="sr-only" type="file" accept=".xlsx,.xlxs,.xlsm,.xls,.ods,.csv,.tsv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="fileSelected" />
               <span class="file-drop__symbol" aria-hidden="true">＋</span>
               <strong>{{ file ? file.name : '点击选择或拖入数据文件' }}</strong>
-              <small>{{ file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : 'Excel：xlsx / xlsm / xls · 表格：ods · 文本：csv / tsv / txt' }}</small>
+              <small>{{ file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : 'Excel：xlsx（兼容 xlxs）/ xlsm / xls · 表格：ods · 文本：csv / tsv / txt' }}</small>
             </label>
             <div v-else class="paste-source">
               <div class="paste-source__head"><div><strong>粘贴 Excel 单元格区域</strong><span>第一行应为字段名，支持制表符、逗号、分号或竖线</span></div><el-button plain @click="readClipboard">读取剪贴板</el-button></div>
