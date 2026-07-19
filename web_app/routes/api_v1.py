@@ -29,6 +29,7 @@ from schemas_v1 import (
     ImportAccepted,
     LoginRequest,
     LoginResponse,
+    PasteImportRequest,
     JobQueryRequest,
     JobStatus,
     OverviewResponse,
@@ -94,29 +95,49 @@ def _parse_csv(value: str | None) -> list[str]:
 
 
 def _verify_signature(path: Path, extension: str) -> None:
-    header = path.read_bytes()[:16]
-    if extension == ".xlsx":
+    with path.open("rb") as source:
+        header = source.read(16)
+    if extension in {".xlsx", ".xlsm"}:
         if not header.startswith(b"PK"):
-            raise ServiceError("FILE_FORMAT_MISMATCH", "文件扩展名与 Excel xlsx 格式不匹配", 415)
+            raise ServiceError("FILE_FORMAT_MISMATCH", f"文件扩展名与 Excel {extension[1:]} 格式不匹配", 415)
         try:
             with zipfile.ZipFile(path) as workbook:
                 names = set(workbook.namelist())
                 required = {"[Content_Types].xml", "xl/workbook.xml"}
                 if not required.issubset(names):
-                    raise ServiceError("FILE_FORMAT_MISMATCH", "文件不是有效的 Excel xlsx 工作簿", 415)
+                    raise ServiceError("FILE_FORMAT_MISMATCH", "文件不是有效的 Excel Open XML 工作簿", 415)
                 uncompressed_size = sum(item.file_size for item in workbook.infolist())
                 if uncompressed_size > 250 * 1024 * 1024:
                     raise ServiceError("FILE_EXPANSION_TOO_LARGE", "Excel 解压后体积超过安全上限", 413)
         except zipfile.BadZipFile as exc:
-            raise ServiceError("FILE_FORMAT_MISMATCH", "Excel xlsx 压缩结构无效", 415) from exc
+            raise ServiceError("FILE_FORMAT_MISMATCH", "Excel 压缩结构无效", 415) from exc
+    if extension == ".ods":
+        if not header.startswith(b"PK"):
+            raise ServiceError("FILE_FORMAT_MISMATCH", "文件扩展名与 ODS 格式不匹配", 415)
+        try:
+            with zipfile.ZipFile(path) as workbook:
+                names = set(workbook.namelist())
+                if not {"mimetype", "content.xml"}.issubset(names):
+                    raise ServiceError("FILE_FORMAT_MISMATCH", "文件不是有效的 ODS 工作簿", 415)
+                uncompressed_size = sum(item.file_size for item in workbook.infolist())
+                if uncompressed_size > 250 * 1024 * 1024:
+                    raise ServiceError("FILE_EXPANSION_TOO_LARGE", "ODS 解压后体积超过安全上限", 413)
+                if workbook.getinfo("mimetype").file_size > 256:
+                    raise ServiceError("FILE_FORMAT_MISMATCH", "ODS 文件类型标识异常", 415)
+                mime = workbook.read("mimetype").decode("ascii", errors="replace").strip()
+                if mime != "application/vnd.oasis.opendocument.spreadsheet":
+                    raise ServiceError("FILE_FORMAT_MISMATCH", "ODS 文件类型标识无效", 415)
+        except zipfile.BadZipFile as exc:
+            raise ServiceError("FILE_FORMAT_MISMATCH", "ODS 压缩结构无效", 415) from exc
     if extension == ".xls" and not header.startswith(bytes.fromhex("D0CF11E0A1B11AE1")):
         raise ServiceError("FILE_FORMAT_MISMATCH", "文件扩展名与 Excel xls 格式不匹配", 415)
-    if extension == ".csv":
-        if b"\x00" in header:
-            raise ServiceError("FILE_FORMAT_MISMATCH", "CSV 文件包含二进制内容", 415)
-        sample = path.read_bytes()[:8192]
-        if not any(delimiter in sample for delimiter in (b",", b";", b"\t")):
-            raise ServiceError("FILE_FORMAT_MISMATCH", "无法识别 CSV 分隔符", 415)
+    if extension in {".csv", ".tsv", ".txt"}:
+        with path.open("rb") as source:
+            sample = source.read(64 * 1024)
+        if b"\x00" in sample:
+            raise ServiceError("FILE_FORMAT_MISMATCH", "文本数据文件包含二进制内容", 415)
+        if not any(delimiter in sample for delimiter in (b",", b";", b"\t", b"|")):
+            raise ServiceError("FILE_FORMAT_MISMATCH", "无法识别文本数据的分隔符", 415)
 
 
 def _accessible_dataset(session: Session, dataset_id: str, workspace_id: str) -> Dataset:
@@ -188,6 +209,79 @@ def auth_logout(response: Response) -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _queue_dataset_import(
+    *,
+    request: Request,
+    session: Session,
+    settings: Settings,
+    kind: Literal["shared", "temporary"],
+    name: str | None,
+    original_name: str,
+    stored_path: Path,
+    sha256: str,
+) -> dict[str, str]:
+    if kind == "shared":
+        duplicate = session.scalar(
+            select(Dataset).where(
+                Dataset.kind == "shared",
+                Dataset.sha256 == sha256,
+                Dataset.status.in_(["processing", "ready", "published", "archived"]),
+            )
+        )
+        if duplicate:
+            stored_path.unlink(missing_ok=True)
+            raise ServiceError(
+                "DUPLICATE_SNAPSHOT",
+                "相同数据已作为共享快照导入",
+                409,
+                {"dataset_id": duplicate.id},
+            )
+
+    dataset_id = stored_path.stem
+    job_id = uuid.uuid4().hex
+    workspace_id = workspace(request)
+    expires_at = utcnow() + timedelta(hours=settings.temporary_ttl_hours) if kind == "temporary" else None
+    fallback_name = Path(original_name).stem or "导入数据"
+    dataset_name = (name or fallback_name).strip() or fallback_name
+    session.add(
+        Dataset(
+            id=dataset_id,
+            kind=kind,
+            status="processing",
+            name=dataset_name[:255],
+            original_filename=original_name[:255],
+            stored_path=str(stored_path.resolve()),
+            sha256=sha256,
+            owner_workspace=workspace_id if kind == "temporary" else None,
+            expires_at=expires_at,
+            quality_status="pending",
+        )
+    )
+    session.add(
+        Job(
+            id=job_id,
+            job_type="dataset_import",
+            status="queued",
+            phase="queued",
+            progress=0,
+            message="数据已接收，等待预检",
+            dataset_id=dataset_id,
+            workspace_id=workspace_id,
+        )
+    )
+    session.commit()
+    request.app.state.job_manager.submit(
+        job_id,
+        process_import,
+        request.app.state.SessionLocal,
+        settings,
+        job_id,
+        dataset_id,
+        stored_path,
+    )
+    return {"job_id": job_id, "dataset_id": dataset_id, "status": "queued"}
+
+
 @router.post(
     "/datasets/imports",
     response_model=ImportAccepted,
@@ -205,10 +299,13 @@ async def create_import(
     original_name = Path(file.filename or "data").name
     extension = Path(original_name).suffix.lower()
     if extension not in settings.allowed_extensions:
-        raise ServiceError("UNSUPPORTED_FILE_TYPE", "仅支持 .xlsx、.xls 和 .csv 文件", 415)
+        raise ServiceError(
+            "UNSUPPORTED_FILE_TYPE",
+            "支持 .xlsx、.xlsm、.xls、.ods、.csv、.tsv 和 .txt 文件",
+            415,
+        )
 
     dataset_id = uuid.uuid4().hex
-    job_id = uuid.uuid4().hex
     stored_path = settings.import_dir / f"{dataset_id}{extension}"
     digest = hashlib.sha256()
     size = 0
@@ -227,63 +324,62 @@ async def create_import(
         stored_path.unlink(missing_ok=True)
         raise
 
-    sha256 = digest.hexdigest()
-    if kind == "shared":
-        duplicate = session.scalar(
-            select(Dataset).where(
-                Dataset.kind == "shared",
-                Dataset.sha256 == sha256,
-                Dataset.status.in_(["processing", "ready", "published", "archived"]),
-            )
-        )
-        if duplicate:
-            stored_path.unlink(missing_ok=True)
-            raise ServiceError(
-                "DUPLICATE_SNAPSHOT",
-                "相同文件已作为共享快照导入",
-                409,
-                {"dataset_id": duplicate.id},
-            )
+    return _queue_dataset_import(
+        request=request,
+        session=session,
+        settings=settings,
+        kind=kind,
+        name=name,
+        original_name=original_name,
+        stored_path=stored_path,
+        sha256=digest.hexdigest(),
+    )
 
-    workspace_id = workspace(request)
-    expires_at = utcnow() + timedelta(hours=settings.temporary_ttl_hours) if kind == "temporary" else None
-    session.add(
-        Dataset(
-            id=dataset_id,
-            kind=kind,
-            status="processing",
-            name=(name or Path(original_name).stem)[:255],
-            original_filename=original_name[:255],
-            stored_path=str(stored_path.resolve()),
-            sha256=sha256,
-            owner_workspace=workspace_id if kind == "temporary" else None,
-            expires_at=expires_at,
-            quality_status="pending",
-        )
+
+@router.post(
+    "/datasets/paste-imports",
+    response_model=ImportAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_paste_import(
+    payload: PasteImportRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    request.app.state.upload_limiter.check(_client_ip(request))
+    content = payload.content.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    if not content.strip():
+        raise ServiceError("EMPTY_PASTE", "粘贴内容为空", 422)
+    encoded = content.encode("utf-8-sig")
+    if len(encoded) > settings.max_upload_bytes:
+        raise ServiceError("PASTE_TOO_LARGE", "粘贴内容超过 50MB 限制", 413)
+    if content.count("\n") > settings.max_rows * 2 + 100:
+        raise ServiceError("PASTE_ROW_LIMIT", "粘贴内容明显超过 100,000 行限制", 413)
+
+    sample = content[:64 * 1024]
+    extension = ".tsv" if "\t" in sample else ".csv" if any(mark in sample for mark in (",", ";")) else ".txt"
+    dataset_id = uuid.uuid4().hex
+    stored_path = settings.import_dir / f"{dataset_id}{extension}"
+    try:
+        stored_path.write_bytes(encoded)
+        _verify_signature(stored_path, extension)
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
+
+    safe_stem = Path(payload.name.replace("\\", "_")).name.strip() or "粘贴数据"
+    original_name = f"{Path(safe_stem).stem[:240]}{extension}"
+    return _queue_dataset_import(
+        request=request,
+        session=session,
+        settings=settings,
+        kind=payload.kind,
+        name=payload.name,
+        original_name=original_name,
+        stored_path=stored_path,
+        sha256=hashlib.sha256(encoded).hexdigest(),
     )
-    session.add(
-        Job(
-            id=job_id,
-            job_type="dataset_import",
-            status="queued",
-            phase="queued",
-            progress=0,
-            message="文件已接收，等待预检",
-            dataset_id=dataset_id,
-            workspace_id=workspace_id,
-        )
-    )
-    session.commit()
-    request.app.state.job_manager.submit(
-        job_id,
-        process_import,
-        request.app.state.SessionLocal,
-        settings,
-        job_id,
-        dataset_id,
-        stored_path,
-    )
-    return {"job_id": job_id, "dataset_id": dataset_id, "status": "queued"}
 
 
 @router.get("/datasets", response_model=list[DatasetSummary])

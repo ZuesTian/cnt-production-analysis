@@ -19,7 +19,7 @@ class Settings:
     max_upload_bytes: int = 50 * 1024 * 1024
     max_rows: int = 100_000
     temporary_ttl_hours: int = 24
-    allowed_extensions: tuple[str, ...] = (".xlsx", ".xls", ".csv")
+    allowed_extensions: tuple[str, ...] = (".xlsx", ".xlsm", ".xls", ".ods", ".csv", ".tsv", ".txt")
     complete_day_lookback: int = 14
     complete_day_min_history: int = 7
     complete_day_min_coverage: float = 0.90

@@ -77,6 +77,12 @@ class ImportAccepted(BaseModel):
     status: str = "queued"
 
 
+class PasteImportRequest(BaseModel):
+    kind: Literal["shared", "temporary"] = "temporary"
+    name: str = Field(default="粘贴数据", min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=8_000_000)
+
+
 class ManualRecordInput(BaseModel):
     production_date: date
     production_line: str = Field(min_length=1, max_length=32)
