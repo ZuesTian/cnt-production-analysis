@@ -413,6 +413,7 @@ def test_xlxs_alias_is_normalized_to_xlsx_and_still_validated(app_client) -> Non
     )
     assert invalid.status_code == 415
     assert invalid.json()["code"] == "FILE_FORMAT_MISMATCH"
+    assert "可能已被 WPS/Excel 加密或保护" in invalid.json()["message"]
 
 
 def test_xlsx_named_legacy_workbook_is_detected_as_xls(tmp_path: Path) -> None:

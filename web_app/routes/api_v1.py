@@ -120,7 +120,14 @@ def _verify_signature(path: Path, extension: str) -> None:
         header = source.read(16)
     if extension in {".xlsx", ".xlsm"}:
         if not header.startswith(b"PK"):
-            raise ServiceError("FILE_FORMAT_MISMATCH", f"文件扩展名与 Excel {extension[1:]} 格式不匹配", 415)
+            raise ServiceError(
+                "FILE_FORMAT_MISMATCH",
+                (
+                    f"文件不是标准的 Excel {extension[1:]} 工作簿；可能已被 WPS/Excel 加密或保护。"
+                    "请在原软件中打开文件后，使用“另存为”生成未加密的 .xlsx 文件；仅修改扩展名无效。"
+                ),
+                415,
+            )
         try:
             with zipfile.ZipFile(path) as workbook:
                 names = set(workbook.namelist())
