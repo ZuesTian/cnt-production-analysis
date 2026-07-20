@@ -424,6 +424,37 @@ def test_xlsx_named_legacy_workbook_is_detected_as_xls(tmp_path: Path) -> None:
     assert _resolve_content_extension(legacy, ".xlsx") == ".xls"
 
 
+def test_only_ztl_can_delete_nonpublished_datasets(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CNT_AUTH_USERS_B64", _auth_users_config([
+        ("ztl", "管理员", "delete-password"),
+        ("yzg", "普通成员", "member-password"),
+    ]))
+    monkeypatch.setenv("CNT_AUTH_SECRET", "dataset-delete-test-secret-that-is-long-enough")
+    app = create_app(tmp_path / "runtime", serve_frontend=False)
+    stored_path = app.state.settings.import_dir / "delete-me.tsv"
+    stored_path.write_text("sample", encoding="utf-8")
+    with app.state.SessionLocal() as session:
+        session.add(Dataset(
+            id="a" * 32, kind="shared", status="failed", name="待删除版本", original_filename="delete-me.tsv",
+            stored_path=str(stored_path), sha256="f" * 64,
+        ))
+        session.commit()
+
+    with TestClient(app) as client:
+        def headers(username: str, password: str) -> dict[str, str]:
+            token = client.post("/api/v1/auth/login", json={"username": username, "password": password}).json()["access_token"]
+            return {"Authorization": f"Bearer {token}"}
+
+        member = headers("yzg", "member-password")
+        assert client.delete(f"/api/v1/datasets/{'a' * 32}?confirm=true", headers=member).status_code == 403
+        owner = headers("ztl", "delete-password")
+        assert client.delete(f"/api/v1/datasets/{'a' * 32}", headers=owner).status_code == 422
+        deleted = client.delete(f"/api/v1/datasets/{'a' * 32}?confirm=true", headers=owner)
+        assert deleted.status_code == 200, deleted.text
+        assert not stored_path.exists()
+        assert client.get(f"/api/v1/datasets/{'a' * 32}/quality", headers=owner).status_code == 404
+
+
 def test_paste_import_accepts_excel_clipboard_tsv_and_runs_quality_gate(app_client) -> None:
     app, client = app_client
     clipboard_rows = pd.DataFrame(source_rows())

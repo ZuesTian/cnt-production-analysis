@@ -128,6 +128,7 @@ export const api = {
   exports: () => request<ExportArtifact[]>('/api/v1/exports'),
   createExport: (body: Record<string, unknown>) => request<{ job_id: string; dataset_id: string }>('/api/v1/exports', { method: 'POST', body: JSON.stringify(body) }),
   publish: (id: string, body: Record<string, unknown>, activate = false) => request<DatasetSummary>(`/api/v1/datasets/${id}/${activate ? 'activate' : 'publish'}`, { method: 'POST', body: JSON.stringify(body) }),
+  deleteDataset: (id: string) => request<{ status: string; dataset_id: string }>(`/api/v1/datasets/${id}?confirm=true`, { method: 'DELETE' }),
   importDataset: (form: FormData) => request<{ job_id: string; dataset_id: string }>('/api/v1/datasets/imports', { method: 'POST', body: form }),
   importPastedDataset: (body: PasteImportPayload) => request<{ job_id: string; dataset_id: string }>('/api/v1/datasets/paste-imports', { method: 'POST', body: JSON.stringify(body) }),
   downloadExport: async (artifact: ExportArtifact) => {

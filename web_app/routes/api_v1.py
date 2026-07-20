@@ -13,13 +13,13 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import Settings
 from auth import AuthManager, InvalidCredentialsError, LoginRateLimitedError
-from models import AuditEvent, Dataset, ExportArtifact, Job, QualityIssue, utcnow
+from models import AuditEvent, Dataset, ExportArtifact, Job, QualityIssue, ShiftRecord, utcnow
 from schemas_v1 import (
     AuthCheckResponse,
     AuthUserBody,
@@ -191,6 +191,26 @@ def _auth_user_body(request: Request) -> dict[str, str]:
     if request.app.state.settings.api_token:
         return {"username": "api-token", "display_name": "访问密钥用户"}
     return {"username": "local", "display_name": "本地用户"}
+
+
+def _require_dataset_delete_permission(request: Request) -> str:
+    """Limit destructive data operations to the explicitly designated owner account."""
+    user = getattr(request.state, "auth_user", None)
+    if user and user.username == "ztl":
+        return user.username
+    raise ServiceError("DATASET_DELETE_FORBIDDEN", "当前账号没有删除数据的权限", 403)
+
+
+def _unlink_data_file(path_text: str, settings: Settings) -> None:
+    """Best-effort cleanup, constrained to the application's managed data directory."""
+    try:
+        path = Path(path_text).resolve()
+        if path.is_relative_to(settings.data_dir.resolve()):
+            path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        # The database transaction is already authoritative. A stale export/import
+        # file can be removed by regular server maintenance without failing deletion.
+        return
 
 
 @router.post("/auth/login", response_model=LoginResponse)
@@ -446,6 +466,55 @@ def list_datasets(
         .offset(offset)
     ).all()
     return [dataset_dict(item) for item in datasets]
+
+
+@router.delete("/datasets/{dataset_id}")
+def delete_dataset(
+    dataset_id: str,
+    request: Request,
+    confirm: bool = Query(False),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    actor = _require_dataset_delete_permission(request)
+    if not confirm:
+        raise ServiceError("CONFIRMATION_REQUIRED", "删除数据需要二次确认", 422)
+
+    dataset = session.get(Dataset, dataset_id)
+    if not dataset:
+        raise ServiceError("DATASET_NOT_FOUND", "数据版本不存在", 404)
+    if dataset.status == "published":
+        raise ServiceError(
+            "PUBLISHED_DATASET_DELETE_FORBIDDEN",
+            "当前已发布的数据不能直接删除；请先发布或回滚到其他数据版本",
+            409,
+        )
+    if dataset.status == "processing":
+        raise ServiceError("DATASET_DELETE_IN_PROGRESS", "数据仍在预检中，暂不能删除", 409)
+
+    artifact_paths = list(
+        session.scalars(select(ExportArtifact.stored_path).where(ExportArtifact.dataset_id == dataset_id))
+    )
+    input_path = dataset.stored_path
+    dataset_snapshot = {"name": dataset.name, "kind": dataset.kind, "status": dataset.status}
+    session.execute(delete(ExportArtifact).where(ExportArtifact.dataset_id == dataset_id))
+    session.execute(delete(Job).where(Job.dataset_id == dataset_id))
+    session.execute(delete(QualityIssue).where(QualityIssue.dataset_id == dataset_id))
+    session.execute(delete(ShiftRecord).where(ShiftRecord.dataset_id == dataset_id))
+    session.delete(dataset)
+    session.add(
+        AuditEvent(
+            action="dataset_deleted",
+            dataset_id=dataset_id,
+            client_ip=_client_ip(request),
+            metadata_json=json_dumps({"actor": actor, **dataset_snapshot}),
+        )
+    )
+    session.commit()
+    _unlink_data_file(input_path, settings)
+    for artifact_path in artifact_paths:
+        _unlink_data_file(artifact_path, settings)
+    return {"status": "deleted", "dataset_id": dataset_id}
 
 
 @router.get("/datasets/{dataset_id}/quality", response_model=QualityReport)

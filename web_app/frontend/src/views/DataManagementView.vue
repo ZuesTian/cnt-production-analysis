@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { api, ApiError } from '@/api/client'
 import { useContextStore } from '@/stores/context'
+import { useAuthStore } from '@/stores/auth'
 import { useJobsStore } from '@/stores/jobs'
 import type { DatasetSummary, JobStatus, QualityReport } from '@/types/api'
 import PageHeader from '@/components/PageHeader.vue'
@@ -11,8 +12,9 @@ import QualityBadge from '@/components/QualityBadge.vue'
 import StatePanel from '@/components/StatePanel.vue'
 import { parseClipboardPreview, REQUIRED_SOURCE_HEADERS } from '@/utils/tabularPaste'
 
-const context = useContextStore(); const jobs = useJobsStore()
+const context = useContextStore(); const jobs = useJobsStore(); const auth = useAuthStore()
 const { datasets } = storeToRefs(context)
+const { user } = storeToRefs(auth)
 const kind = ref<'shared' | 'temporary'>('shared')
 const sourceMode = ref<'file' | 'paste'>('file')
 const name = ref('')
@@ -22,6 +24,7 @@ const job = ref<JobStatus | null>(null)
 const quality = ref<QualityReport | null>(null)
 const importing = ref(false)
 const publishing = ref(false)
+const deletingId = ref<string | null>(null)
 const riskAcknowledged = ref(false)
 const completeDates = ref<Record<string, string>>({})
 const input = ref<HTMLInputElement>()
@@ -39,6 +42,7 @@ const step = computed(() => {
 const sharedDatasets = computed(() => datasets.value.filter((item) => item.kind === 'shared'))
 const highIssues = computed(() => quality.value?.issues.filter((item) => ['high', 'critical'].includes(item.severity)) || [])
 const canPublish = computed(() => quality.value?.dataset.kind === 'shared' && quality.value.dataset.status === 'ready' && (highIssues.value.length === 0 || riskAcknowledged.value))
+const canDeleteDatasets = computed(() => user.value?.username === 'ztl')
 
 function setSelectedFile(selected: File | null) {
   if (!selected) return
@@ -119,6 +123,17 @@ async function activate(dataset: DatasetSummary) {
   } catch (caught) { if (caught !== 'cancel' && caught !== 'close') ElMessage.error(caught instanceof ApiError ? caught.message : '回滚失败') }
 }
 
+async function removeDataset(dataset: DatasetSummary) {
+  try {
+    await ElMessageBox.confirm(`确认删除“${dataset.name}”？其源文件、分析记录和已生成报表将一并删除，且无法恢复。`, '确认删除数据版本', { confirmButtonText: '永久删除', cancelButtonText: '取消', type: 'error' })
+    deletingId.value = dataset.id
+    await api.deleteDataset(dataset.id)
+    if (quality.value?.dataset.id === dataset.id) quality.value = null
+    await context.refreshDatasets()
+    ElMessage.success('数据版本已删除')
+  } catch (caught) { if (caught !== 'cancel' && caught !== 'close') ElMessage.error(caught instanceof ApiError ? caught.message : '删除失败') } finally { deletingId.value = null }
+}
+
 function resetImport() {
   file.value = null; pasteContent.value = ''; name.value = ''; job.value = null; quality.value = null; riskAcknowledged.value = false
   if (input.value) input.value.value = ''
@@ -192,7 +207,7 @@ onMounted(() => void context.refreshDatasets())
           <el-table-column label="状态" width="120"><template #default="scope"><span class="version-status" :class="`version-status--${scope.row.status}`">{{ scope.row.status }}</span></template></el-table-column>
           <el-table-column label="质量" width="130"><template #default="scope"><QualityBadge :status="scope.row.quality_status" compact /></template></el-table-column>
           <el-table-column prop="row_count" label="班次记录" width="120" /><el-table-column prop="date_max" label="数据截止" width="120" /><el-table-column prop="created_at" label="导入时间" width="190" />
-          <el-table-column label="操作" width="190"><template #default="scope"><el-button link type="primary" @click="inspect(scope.row)">质量报告</el-button><el-button v-if="scope.row.status === 'archived'" link type="warning" @click="activate(scope.row)">回滚至此</el-button></template></el-table-column>
+          <el-table-column label="操作" width="250"><template #default="scope"><el-button link type="primary" @click="inspect(scope.row)">质量报告</el-button><el-button v-if="scope.row.status === 'archived'" link type="warning" @click="activate(scope.row)">回滚至此</el-button><el-button v-if="canDeleteDatasets && scope.row.status !== 'published'" link type="danger" :loading="deletingId === scope.row.id" @click="removeDataset(scope.row)">删除</el-button></template></el-table-column>
         </el-table>
       </section>
     </div>
