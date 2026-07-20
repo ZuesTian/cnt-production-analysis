@@ -103,12 +103,13 @@ def test_remote_api_requires_bearer_token_and_supports_cors(tmp_path: Path, monk
             "/api/v1/datasets",
             headers={
                 "Origin": origin,
-                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Method": "DELETE",
                 "Access-Control-Request-Headers": "authorization,x-cnt-workspace",
             },
         )
         assert preflight.status_code == 200
         assert preflight.headers["access-control-allow-origin"] == origin
+        assert "DELETE" in preflight.headers["access-control-allow-methods"]
 
         authorized = client.get(
             "/api/v1/auth/check",
