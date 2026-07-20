@@ -95,6 +95,7 @@ def _parse_csv(value: str | None) -> list[str]:
 
 
 OLE_WORKBOOK_SIGNATURE = bytes.fromhex("D0CF11E0A1B11AE1")
+DATASET_DELETE_USERS = frozenset({"ztl", "yzg"})
 
 
 def _resolve_content_extension(path: Path, requested_extension: str) -> str:
@@ -196,7 +197,7 @@ def _auth_user_body(request: Request) -> dict[str, str]:
 def _require_dataset_delete_permission(request: Request) -> str:
     """Limit destructive data operations to the explicitly designated owner account."""
     user = getattr(request.state, "auth_user", None)
-    if user and user.username == "ztl":
+    if user and user.username in DATASET_DELETE_USERS:
         return user.username
     raise ServiceError("DATASET_DELETE_FORBIDDEN", "当前账号没有删除数据的权限", 403)
 
