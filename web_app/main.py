@@ -152,7 +152,7 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
             CORSMiddleware,
             allow_origins=list(settings.allowed_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type", "X-CNT-Workspace"],
             expose_headers=["Content-Disposition"],
             max_age=3600,
