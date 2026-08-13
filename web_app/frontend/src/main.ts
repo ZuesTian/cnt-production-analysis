@@ -5,7 +5,10 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import router from './router'
+import { initializeTheme } from './theme'
 import './styles.css'
+
+initializeTheme()
 
 createApp(App)
   .use(createPinia())
