@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useContextStore } from '@/stores/context'
 import QualityBadge from './QualityBadge.vue'
+import ThemeToggle from './ThemeToggle.vue'
 
 const emit = defineEmits<{ change: [] }>()
 const context = useContextStore()
@@ -34,6 +35,7 @@ function reset() { context.resetScope(); emit('change') }
       </div>
       <div v-else class="dataset-context dataset-context--empty"><span>尚未选择数据版本</span></div>
       <slot name="mobile-title" />
+      <ThemeToggle class="context-theme-toggle" />
     </div>
 
     <div class="filter-row desktop-filters" aria-label="全局数据筛选">

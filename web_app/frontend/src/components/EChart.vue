@@ -14,6 +14,7 @@ import {
   VisualMapComponent,
 } from 'echarts/components'
 import { SVGRenderer } from 'echarts/renderers'
+import { activeTheme } from '@/theme'
 
 use([
   BarChart, BoxplotChart, HeatmapChart, LineChart, AriaComponent, DataZoomComponent,
@@ -31,12 +32,17 @@ const props = withDefaults(defineProps<{
 const chartEl = ref<HTMLDivElement>()
 let chart: ECharts | null = null
 let observer: ResizeObserver | null = null
+let renderedTheme = ''
 
 function render() {
   if (!chartEl.value) return
-  if (!chart) chart = init(chartEl.value, undefined, { renderer: 'svg' })
+  if (!chart || renderedTheme !== activeTheme.value) {
+    chart?.dispose()
+    renderedTheme = activeTheme.value
+    chart = init(chartEl.value, activeTheme.value === 'dark' ? 'dark' : undefined, { renderer: 'svg' })
+  }
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  chart.setOption({ animation: !reduceMotion, aria: { enabled: true, decal: { show: true } }, ...props.option }, { notMerge: true })
+  chart.setOption({ animation: !reduceMotion, backgroundColor: 'transparent', aria: { enabled: true, decal: { show: true } }, ...props.option }, { notMerge: true })
 }
 
 function saveDataUrl(url: string, extension: string) {
@@ -77,6 +83,7 @@ function exportSvg() {
 }
 
 watch(() => props.option, () => void nextTick(render), { deep: true })
+watch(activeTheme, () => void nextTick(render))
 onMounted(() => {
   render()
   observer = new ResizeObserver(() => chart?.resize())
