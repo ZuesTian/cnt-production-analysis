@@ -34,6 +34,7 @@ function reset() { context.resetScope(); emit('change') }
         <QualityBadge :status="activeDataset.quality_status" compact />
       </div>
       <div v-else class="dataset-context dataset-context--empty"><span>尚未选择数据版本</span></div>
+      <a class="mobile-portal" href="https://zuestian.github.io/Cnanotools/">返回 CNT LAB</a>
       <slot name="mobile-title" />
       <ThemeToggle class="context-theme-toggle" />
     </div>
@@ -68,7 +69,7 @@ function reset() { context.resetScope(); emit('change') }
     <div class="mobile-filter-form">
       <label class="field"><span>数据版本</span><el-select :model-value="datasetId" @change="datasetChanged"><el-option v-for="item in datasets" :key="item.id" :label="item.name" :value="item.id" /></el-select></label>
       <label class="field"><span>产线</span><el-select v-model="productionLines" multiple clearable @change="changed"><el-option v-for="line in filters?.production_lines || []" :key="line" :label="line" :value="line" /></el-select></label>
-      <label class="field"><span>炉号</span><el-select v-model="furnaces" filterable clearable @change="changed"><el-option v-for="item in availableFurnaces" :key="item" :label="item" :value="item" /></el-select></label>
+      <label class="field"><span>炉号</span><el-select v-model="furnaces" multiple filterable clearable @change="changed"><el-option v-for="item in availableFurnaces" :key="item" :label="item" :value="item" /></el-select></label>
       <label class="field"><span>日期范围</span><el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始" end-placeholder="结束" @change="changed" /></label>
       <div class="mobile-filter-actions"><el-button @click="reset">重置</el-button><el-button type="primary" @click="mobileOpen = false">查看结果</el-button></div>
     </div>

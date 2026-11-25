@@ -24,7 +24,7 @@ import analysis
 from auth import AuthManager, InvalidSessionError
 from config import build_settings
 from database import create_database, migrate_database
-from models import Dataset
+from models import Dataset, RevokedSession
 from routes.api_v1 import UploadRateLimiter, router as api_v1_router
 from services.common import ServiceError
 from services.import_service import cleanup_expired_temporary
@@ -111,7 +111,13 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             try:
-                request.state.auth_user = auth_manager.verify_token(supplied_token)
+                user, jti, expires_at = auth_manager.verify_session(supplied_token)
+                with session_factory() as session:
+                    if session.get(RevokedSession, jti) is not None:
+                        raise InvalidSessionError
+                request.state.auth_user = user
+                request.state.session_id = jti
+                request.state.session_expiry = expires_at
             except InvalidSessionError:
                 return JSONResponse(
                     status_code=401,
@@ -184,6 +190,11 @@ def create_app(data_dir: str | Path | None = None, *, serve_frontend: bool = Tru
             status_code=500,
             content={"code": "INTERNAL_ERROR", "message": "服务器处理请求时发生错误", "details": None},
         )
+
+    @app.get("/health")
+    def portal_health():
+        return JSONResponse({"status": "ok", "version": app.version},
+                            headers={"Access-Control-Allow-Origin": "https://zuestian.github.io"})
 
     app.include_router(api_v1_router)
 

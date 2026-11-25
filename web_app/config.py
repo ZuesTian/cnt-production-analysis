@@ -26,6 +26,7 @@ class Settings:
     yield_delta_warning: float = 5.0
     freshness_warning_days: int = 2
     allowed_origins: tuple[str, ...] = ()
+    dataset_managers: tuple[str, ...] = ()
     api_token: str | None = None
     auth_users_b64: str | None = None
     auth_secret: str | None = None
@@ -51,6 +52,7 @@ def build_settings(data_dir: str | Path | None = None) -> Settings:
         export_dir=root / "exports",
         frontend_dist=WEB_APP_DIR / "frontend" / "dist",
         allowed_origins=allowed_origins,
+        dataset_managers=tuple(n.strip().lower() for n in os.environ.get("CNT_DATASET_MANAGERS", "").split(",") if n.strip()),
         api_token=os.environ.get("CNT_API_TOKEN") or None,
         auth_users_b64=os.environ.get("CNT_AUTH_USERS_B64") or None,
         auth_secret=os.environ.get("CNT_AUTH_SECRET") or None,

@@ -67,13 +67,14 @@ function exportPng() {
     canvas.height = chartEl.value!.clientHeight * 2
     const context = canvas.getContext('2d')
     if (context) {
-      context.fillStyle = '#ffffff'
+      context.fillStyle = renderedTheme === 'dark' ? '#132723' : '#ffffff'
       context.fillRect(0, 0, canvas.width, canvas.height)
       context.drawImage(image, 0, 0, canvas.width, canvas.height)
       saveDataUrl(canvas.toDataURL('image/png'), 'png')
     }
     URL.revokeObjectURL(blobUrl)
   }
+  image.onerror = () => URL.revokeObjectURL(blobUrl)
   image.src = blobUrl
 }
 

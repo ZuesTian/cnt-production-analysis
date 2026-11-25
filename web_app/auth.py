@@ -224,6 +224,9 @@ class AuthManager:
         return f"{signed}.{signature}", self.token_ttl_seconds
 
     def verify_token(self, token: str, *, now: int | None = None) -> AuthUser:
+        return self.verify_session(token, now=now)[0]
+
+    def verify_session(self, token: str, *, now: int | None = None) -> tuple[AuthUser, str, int]:
         try:
             version, encoded_payload, supplied_signature = token.split(".", 2)
             if version != "v1":
@@ -246,6 +249,9 @@ class AuthManager:
             user = self.users.get(username.lower())
             if user is None:
                 raise InvalidSessionError
-            return user
+            jti = payload["jti"]
+            if not isinstance(jti, str) or not jti:
+                raise InvalidSessionError
+            return user, jti, expires_at
         except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, json.JSONDecodeError) as exc:
             raise InvalidSessionError from exc

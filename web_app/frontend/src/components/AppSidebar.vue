@@ -28,6 +28,7 @@ function toggle() {
       <div class="brand__symbol" aria-hidden="true"><i /><i /><i /></div>
       <div class="brand__text"><strong>生产分析台</strong><span>CNT WORKBENCH</span></div>
     </div>
+    <a href="https://zuestian.github.io/Cnanotools/">返回 CNT LAB</a>
     <nav class="primary-nav" aria-label="主要导航">
       <RouterLink
         v-for="item in items"
@@ -40,7 +41,7 @@ function toggle() {
         <span>{{ collapsed ? item.short : item.label }}</span>
       </RouterLink>
     </nav>
-    <div v-if="user" class="sidebar-session" :title="`${user.display_name}（${user.username}）`">
+    <div v-if="user && auth.loginRequired" class="sidebar-session" :title="`${user.display_name}（${user.username}）`">
       <span class="sidebar-session__avatar">{{ user.display_name.slice(0, 1).toUpperCase() }}</span>
       <span class="sidebar-session__identity"><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span>
       <button type="button" aria-label="退出登录" title="退出登录" @click="auth.logout">退出</button>

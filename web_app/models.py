@@ -150,3 +150,10 @@ class AuditEvent(Base):
     client_ip: Mapped[str] = mapped_column(String(64), default="unknown")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class RevokedSession(Base):
+    __tablename__ = "revoked_sessions"
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[int] = mapped_column(Integer, index=True)

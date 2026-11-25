@@ -21,6 +21,7 @@ class LoginRequest(BaseModel):
 
 
 class AuthUserBody(BaseModel):
+    can_delete_datasets: bool | None = None
     username: str
     display_name: str
 

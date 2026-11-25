@@ -6,7 +6,7 @@ cnt-analysis.47.236.76.214.nip.io {
 		X-Frame-Options DENY
 	}
 
-	@api path /api/*
+	@api path /api/* /health
 	handle @api {
 		request_body {
 			max_size 50MB
@@ -14,5 +14,7 @@ cnt-analysis.47.236.76.214.nip.io {
 		reverse_proxy 127.0.0.1:8768
 	}
 
-	respond "CNT production analysis API" 200
+	handle {
+		reverse_proxy 127.0.0.1:8768
+	}
 }

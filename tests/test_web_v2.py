@@ -202,6 +202,7 @@ def test_account_login_issues_signed_sessions_for_all_configured_users(
         assert client.get("/api/v1/datasets", headers=headers).status_code == 200
         assert client.post("/api/v1/auth/logout", headers=headers).json() == {"status": "ok"}
 
+        assert client.get("/api/v1/auth/me", headers=headers).status_code == 401
         tampered = client.get(
             "/api/v1/auth/me",
             headers={"Authorization": f"Bearer {tokens['owner']}x"},
@@ -431,6 +432,7 @@ def test_only_authorized_accounts_can_delete_nonpublished_datasets(tmp_path: Pat
         ("yzg", "授权成员", "delete-password"),
         ("gy", "共用账号", "member-password"),
     ]))
+    monkeypatch.setenv("CNT_DATASET_MANAGERS", "ztl,yzg")
     monkeypatch.setenv("CNT_AUTH_SECRET", "dataset-delete-test-secret-that-is-long-enough")
     app = create_app(tmp_path / "runtime", serve_frontend=False)
     stored_path = app.state.settings.import_dir / "delete-me.tsv"

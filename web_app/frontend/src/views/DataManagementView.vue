@@ -42,7 +42,7 @@ const step = computed(() => {
 const sharedDatasets = computed(() => datasets.value.filter((item) => item.kind === 'shared'))
 const highIssues = computed(() => quality.value?.issues.filter((item) => ['high', 'critical'].includes(item.severity)) || [])
 const canPublish = computed(() => quality.value?.dataset.kind === 'shared' && quality.value.dataset.status === 'ready' && (highIssues.value.length === 0 || riskAcknowledged.value))
-const canDeleteDatasets = computed(() => ['ztl', 'yzg'].includes(user.value?.username || ''))
+const canDeleteDatasets = computed(() => user.value?.can_delete_datasets === true)
 
 function setSelectedFile(selected: File | null) {
   if (!selected) return

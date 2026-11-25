@@ -42,6 +42,7 @@ onBeforeUnmount(() => window.removeEventListener('cnt-auth-required', requireAut
         <span class="login-page__mark" aria-hidden="true"><i /><i /><i /></span>
         <span><strong>生产分析台</strong><small>CNT PRODUCTION WORKBENCH</small></span>
       </div>
+    <a href="https://zuestian.github.io/Cnanotools/">返回 CNT LAB</a>
       <ThemeToggle />
     </div>
     <div class="login-page__grid">

@@ -53,7 +53,7 @@ watch(() => route.query.dataset, (value) => {
       <RouterLink to="/"><span aria-hidden="true">▦</span><small>总览</small></RouterLink>
       <RouterLink to="/diagnostics"><span aria-hidden="true">△</span><small>告警</small></RouterLink>
       <RouterLink to="/furnaces"><span aria-hidden="true">◎</span><small>炉号</small></RouterLink>
-      <button v-if="auth.user" type="button" aria-label="退出登录" @click="auth.logout"><span aria-hidden="true">退</span><small>退出</small></button>
+      <button v-if="auth.user && auth.loginRequired" type="button" aria-label="退出登录" @click="auth.logout"><span aria-hidden="true">退</span><small>退出</small></button>
     </nav>
   </div>
 </template>

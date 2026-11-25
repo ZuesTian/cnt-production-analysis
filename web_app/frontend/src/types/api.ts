@@ -99,6 +99,7 @@ export interface ExportArtifact {
 export interface ApiErrorBody { code: string; message: string; details?: unknown }
 
 export interface AuthUser {
+  can_delete_datasets?: boolean
   username: string
   display_name: string
 }

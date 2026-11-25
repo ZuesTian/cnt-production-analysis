@@ -22,6 +22,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function initialize() {
     if (!loginRequired.value && !api.hasAccessToken()) {
+      try { user.value = await api.me() } catch { /* API may be offline. */ }
       checking.value = false
       ready.value = true
       return

@@ -37,11 +37,11 @@ const trendOption = computed(() => {
   return {
     color: ['#167875', '#bd7625', '#76a9a2', '#8c5936'],
     tooltip: { trigger: 'axis', valueFormatter: (value: unknown) => typeof value === 'number' ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : String(value ?? '—') },
-    legend: { top: 0, left: 0, textStyle: { color: '#54615f' } },
+    legend: { top: 0, left: 0, textStyle: {} },
     grid: { left: 62, right: 64, top: 48, bottom: 52 },
-    xAxis: { type: 'category', data: categories, axisLabel: { formatter: (value: string) => value.slice(5).replace(' · ', ' '), hideOverlap: true }, axisLine: { lineStyle: { color: '#cfd5d1' } } },
+    xAxis: { type: 'category', data: categories, axisLabel: { formatter: (value: string) => value.slice(5).replace(' · ', ' '), hideOverlap: true }, axisLine: { show: true } },
     yAxis: [
-      { type: 'value', name: '产量 kg', splitLine: { lineStyle: { color: '#e8e9e5' } } },
+      { type: 'value', name: '产量 kg', splitLine: { show: true } },
       { type: 'value', name: '产率 kg/h', splitLine: { show: false } },
     ],
     dataZoom: categories.length > 45 ? [{ type: 'inside', start: 55, end: 100 }, { type: 'slider', height: 18, bottom: 6 }] : [],
@@ -54,7 +54,7 @@ const rankingOption = computed(() => {
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     grid: { left: 90, right: 36, top: 12, bottom: 32 },
-    xAxis: { type: 'value', name: 'kg/h', splitLine: { lineStyle: { color: '#e8e9e5' } } },
+    xAxis: { type: 'value', name: 'kg/h', splitLine: { show: true } },
     yAxis: { type: 'category', data: rows.map((row) => String(row.furnace)), axisTick: { show: false } },
     series: [{ type: 'bar', name: '加权产率', data: rows.map((row) => row.weighted_yield), barWidth: 14, itemStyle: { color: '#167875', borderRadius: [0, 4, 4, 0] } }],
   }

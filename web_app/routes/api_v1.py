@@ -15,11 +15,12 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from config import Settings
 from auth import AuthManager, InvalidCredentialsError, LoginRateLimitedError
-from models import AuditEvent, Dataset, ExportArtifact, Job, QualityIssue, ShiftRecord, utcnow
+from models import AuditEvent, Dataset, ExportArtifact, Job, QualityIssue, RevokedSession, ShiftRecord, utcnow
 from schemas_v1 import (
     AuthCheckResponse,
     AuthUserBody,
@@ -95,7 +96,7 @@ def _parse_csv(value: str | None) -> list[str]:
 
 
 OLE_WORKBOOK_SIGNATURE = bytes.fromhex("D0CF11E0A1B11AE1")
-DATASET_DELETE_USERS = frozenset({"ztl", "yzg"})
+
 
 
 def _resolve_content_extension(path: Path, requested_extension: str) -> str:
@@ -185,20 +186,22 @@ def health(request: Request) -> dict[str, str]:
     return {"status": "ok", "version": request.app.version}
 
 
-def _auth_user_body(request: Request) -> dict[str, str]:
+def _auth_user_body(request: Request) -> dict[str, str | bool]:
     user = getattr(request.state, "auth_user", None)
     if user is not None:
-        return user.public_dict()
+        body: dict[str, str | bool] = {**user.public_dict()}
+        if user.username.lower() in request.app.state.settings.dataset_managers:
+            body["can_delete_datasets"] = True
+        return body
     if request.app.state.settings.api_token:
         return {"username": "api-token", "display_name": "访问密钥用户"}
-    return {"username": "local", "display_name": "本地用户"}
+    return {"username": "local", "display_name": "本地用户", "can_delete_datasets": True}
 
 
 def _require_dataset_delete_permission(request: Request) -> str:
-    """Limit destructive data operations to the explicitly designated owner account."""
-    user = getattr(request.state, "auth_user", None)
-    if user and user.username in DATASET_DELETE_USERS:
-        return user.username
+    identity = _auth_user_body(request)
+    if identity.get("can_delete_datasets"):
+        return str(identity["username"])
     raise ServiceError("DATASET_DELETE_FORBIDDEN", "当前账号没有删除数据的权限", 403)
 
 
@@ -214,7 +217,7 @@ def _unlink_data_file(path_text: str, settings: Settings) -> None:
         return
 
 
-@router.post("/auth/login", response_model=LoginResponse)
+@router.post("/auth/login", response_model=LoginResponse, response_model_exclude_none=True)
 def auth_login(payload: LoginRequest, request: Request, response: Response) -> dict:
     manager: AuthManager | None = request.app.state.auth_manager
     if manager is None:
@@ -232,28 +235,34 @@ def auth_login(payload: LoginRequest, request: Request, response: Response) -> d
         raise ServiceError("INVALID_CREDENTIALS", "账号或密码错误", 401) from exc
     token, expires_in = manager.issue_token(user)
     response.headers["Cache-Control"] = "no-store"
+    request.state.auth_user = user
     return {
         "access_token": token,
         "token_type": "bearer",
         "expires_in": expires_in,
-        "user": user.public_dict(),
+        "user": _auth_user_body(request),
     }
 
 
-@router.get("/auth/me", response_model=AuthUserBody)
-def auth_me(request: Request, response: Response) -> dict[str, str]:
+@router.get("/auth/me", response_model=AuthUserBody, response_model_exclude_none=True)
+def auth_me(request: Request, response: Response) -> dict[str, str | bool]:
     response.headers["Cache-Control"] = "no-store"
     return _auth_user_body(request)
 
 
-@router.get("/auth/check", response_model=AuthCheckResponse)
+@router.get("/auth/check", response_model=AuthCheckResponse, response_model_exclude_none=True)
 def auth_check(request: Request, response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
     return {"status": "ok", "user": _auth_user_body(request)}
 
 
 @router.post("/auth/logout")
-def auth_logout(response: Response) -> dict[str, str]:
+def auth_logout(request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, str]:
+    if request.app.state.auth_manager:
+        session.execute(delete(RevokedSession).where(RevokedSession.expires_at <= int(time.time())))
+        session.execute(insert(RevokedSession).values(jti=request.state.session_id,
+                        expires_at=request.state.session_expiry).on_conflict_do_nothing())
+        session.commit()
     response.headers["Cache-Control"] = "no-store"
     return {"status": "ok"}
 
@@ -613,6 +622,7 @@ def _publish_or_activate(
                         "sha256": dataset.sha256,
                         "complete_dates": complete_dates,
                         "acknowledged_issue_codes": payload.acknowledged_issue_codes,
+                        "actor": _auth_user_body(request)["username"],
                     }
                 ),
             )
