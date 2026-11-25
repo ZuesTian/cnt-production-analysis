@@ -6,6 +6,9 @@ cnt-analysis.47.236.76.214.nip.io {
 		X-Frame-Options DENY
 	}
 
+	handle /api/usage/record {
+		reverse_proxy 127.0.0.1:8782
+	}
 	@api path /api/* /health
 	handle @api {
 		request_body {
